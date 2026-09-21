@@ -1,0 +1,54 @@
+[Unit]
+Description=Beam SN105 Orchestrator
+Documentation=https://github.com/Beam-Network/beam
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=beam
+Group=beam
+EnvironmentFile=/etc/beam/beam.env
+WorkingDirectory=/var/lib/beam
+
+# State paths are passed explicitly; the binary's defaults are relative to the working
+# directory, which makes them easy to lose track of.
+ExecStart=/opt/beam/bin/beam-orchestrator serve \
+  --netuid 105 \
+  --addr 127.0.0.1:8781 \
+  --state /var/lib/beam/orchestrator/registry.json \
+  --wcp-journal /var/lib/beam/orchestrator/wcp-events.jsonl \
+  --task-state /var/lib/beam/orchestrator/tasks.json \
+  --room-transfer-state /var/lib/beam/orchestrator/room-transfers.json \
+  --room-workload-state /var/lib/beam/orchestrator/room-workloads \
+  --payment-state /var/lib/beam/orchestrator/payment-evidence.json \
+  --payment-key /var/lib/beam/orchestrator/payment-attestation.key
+
+# Uptime is scored: readiness_multiplier is linear in active_time_ratio, so restart hard.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+
+# Many concurrent transfer sockets.
+LimitNOFILE=1048576
+
+# Only one orchestrator process per hotkey, or BeamCore returns duplicate_control_session.
+KillMode=mixed
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/beam
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=beam-orchestrator
+
+[Install]
+WantedBy=multi-user.target

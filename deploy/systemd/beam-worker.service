@@ -1,0 +1,56 @@
+[Unit]
+Description=Beam SN105 Worker
+Documentation=https://github.com/Beam-Network/beam
+After=network-online.target beam-orchestrator.service
+Wants=network-online.target
+# Co-located deployment: the worker's WCP session targets the local orchestrator.
+BindsTo=beam-orchestrator.service
+
+[Service]
+Type=simple
+User=beam
+Group=beam
+EnvironmentFile=/etc/beam/beam.env
+WorkingDirectory=/var/lib/beam
+
+# --allow-public-network-listeners defaults to FALSE and gates the room handler entirely.
+# Without it, binding 0.0.0.0:9470 will not serve public room transfers — and room transfers
+# are extra uploaded MiB, which is what sets your rank.
+ExecStart=/opt/beam/bin/beam-worker serve \
+  --addr 127.0.0.1:8780 \
+  --node-key /var/lib/beam/worker/node.key \
+  --state /var/lib/beam/worker/workloads.json \
+  --action-cache /var/lib/beam/worker/action-cache \
+  --action-scratch /var/lib/beam/worker/action-scratch \
+  --capabilities ${BEAM_WORKER_CAPABILITIES} \
+  --memory-bytes ${BEAM_WORKER_MEMORY_BYTES} \
+  --scratch-bytes ${BEAM_WORKER_SCRATCH_BYTES} \
+  --bandwidth-mbps ${BEAM_WORKER_BANDWIDTH_MBPS} \
+  --allow-public-network-listeners \
+  --room-transfer-addr ${BEAM_ROOM_TRANSFER_LISTEN_ADDR} \
+  --room-transfer-advertise-url ${BEAM_ROOM_TRANSFER_ADVERTISE_URL}
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+
+LimitNOFILE=1048576
+KillMode=mixed
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/beam
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=beam-worker
+
+[Install]
+WantedBy=multi-user.target
