@@ -32,12 +32,12 @@ source "$CONF_DIR/orchestrator.creds"
 [[ -n "${ORCHESTRATOR_ID:-}" ]] || die "ORCHESTRATOR_ID not set in orchestrator.creds"
 
 log "Checking orchestrator is running"
-# The health route is namespaced: /v1/orchestrator/health. A bare /health returns 404, and with
-# curl -f that 404 is indistinguishable from the process being down - which used to abort this
-# script against a perfectly healthy orchestrator. Accept ANY HTTP response as proof of life and
-# fail only on a connection error, so a route rename cannot break registration again.
+# The health route is GET /healthz at the ROOT (verified against the compiled route table);
+# the docs claim /v1/orchestrator/health, which 404s. With curl -f a 404 is indistinguishable
+# from the process being down, which used to abort this script against a healthy orchestrator.
+# Accept ANY HTTP response as proof of life; fail only on a connection error.
 HTTP_CODE="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
-              "$ORCH_API/v1/orchestrator/health" 2>/dev/null || echo 000)"
+              "$ORCH_API/healthz" 2>/dev/null || echo 000)"
 if [[ "$HTTP_CODE" == "000" ]]; then
   HTTP_CODE="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$ORCH_API/" 2>/dev/null || echo 000)"
 fi

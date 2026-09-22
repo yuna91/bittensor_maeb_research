@@ -651,6 +651,14 @@ sudo ls -l /root/deploy
 `rsync -av --delete deploy/ beam-vps:/home/ops/deploy/` is the better form once you start
 iterating on the scripts — it re-sends only what changed.
 
+> **Re-syncing a script later?** Run the remote half with `ssh -t`, or `sudo` aborts with
+> *"a terminal is required to read the password"* — a command passed to `ssh` gets no TTY, so
+> `sudo` has nowhere to prompt:
+> ```bash
+> scp deploy/00-bootstrap.sh beam-vps:/home/ops/
+> ssh -t beam-vps 'sudo cp /home/ops/00-bootstrap.sh /root/deploy/ >   && sudo find /root/deploy -name "*.sh" -exec chmod +x {} + >   && rm /home/ops/00-bootstrap.sh'
+> ```
+
 > **Why `find` and not `chmod +x /root/deploy/*.sh`?** Your shell expands the glob as `ops`
 > *before* `sudo` runs, and `/root` is mode 700 — so it matches nothing and `chmod` is handed the
 > literal string, giving `cannot access '/root/deploy/*.sh': No such file or directory`. The
@@ -891,7 +899,7 @@ receive no work and likely don't know why.
 ```bash
 sudo systemctl enable --now beam-orchestrator
 sudo journalctl -u beam-orchestrator -f
-curl -s http://127.0.0.1:8781/v1/orchestrator/health; echo
+curl -s http://127.0.0.1:8781/healthz; echo
 ```
 
 A healthy start looks like this — three lines, then silence:
@@ -906,9 +914,16 @@ Beam Orchestrator 0.2.0 orchestrator_id=<uuid> listening on 127.0.0.1:8781
 loopback; the `orchestrator_id` means it read your Step 8 registration out of `beam.env`. Any
 `Main process exited` line after them means it is still failing — read the line above it.
 
-> **The control API is namespaced under `/v1/orchestrator/`.** A bare `curl http://127.0.0.1:8781/health`
-> returns `404 page not found` — which is not a fault: a 404 proves the HTTP server is up and
-> answering. `Connection refused` is the response that means the process is down.
+> **The health route is `GET /healthz`, at the root.** Beam's published `docs/orchestrator.md`
+> documents `/v1/orchestrator/health`; that route does not exist and returns
+> `404 page not found`. Verified against the compiled route table in
+> `internal/orchestrator/server/server.go` at build revision `8be314b`. A 404 is still proof the
+> HTTP server is up — `Connection refused` is the answer that means the process is down. Note
+> also that port 8782 speaks TLS, so `curl http://...:8782` returns nothing; that is expected.
+>
+> The other routes on 8781, all `/v1/orchestrator/`-prefixed: `manifest`, `memberships` (used by
+> Step 11), `observations`, `placements`, `workloads/{offers,commits,cancel}`,
+> `circuits[/revoke]`, `transfers/{plan,dispatch}`, `network/links`, `tasks`, `task-events`.
 
 Local success is not the same as reachable. Confirm from **your Linux PC**, not the VPS:
 
@@ -1008,6 +1023,18 @@ ranking while ~25 UIDs are evicted daily. This is the squeeze — survive it and
 
 1. **Pool** — must flip `qualifying` → `qualified` within a few days
 2. **Rank** — ≤120 you are earning; 121+ you are not
+
+Alongside those, the orchestrator's own control API tells you whether work is actually arriving
+— more directly than the log does:
+
+```bash
+curl -s http://127.0.0.1:8781/v1/orchestrator/tasks | jq 'length'   # chunks assigned to you
+curl -s http://127.0.0.1:8781/v1/orchestrator/manifest | jq .       # what you advertise
+```
+
+During the qualifying period a rising task count is the earliest sign PRISM is routing to you.
+A flat zero after a few hours, with the service healthy, points at reachability — re-check
+`nc -vz <YOUR_PUBLIC_IP> 8782` from off the box.
 
 ### Uptime alerting
 
@@ -1111,6 +1138,7 @@ curl -X DELETE https://beamcore.b1m.ai/orchestrators/history \
 | `x509: certificate relies on legacy Common Name field` | Cert has no SAN. Re-run Step 6. |
 | Stuck in `qualifying` past 48 h | Check CPU saturation (`htop`), worker transfer errors, and that 8782 is reachable from outside |
 | `readinessMultiplier` = 0 | Control plane disconnected, or cert expired |
+| `404 page not found` from `127.0.0.1:8781` | Wrong path, not a broken service. Health is `GET /healthz`, not `/v1/orchestrator/health` (the published docs are wrong). A 404 proves the server is up |
 | `open /etc/beam/wcp.crt: permission denied`, service restart-looping | `/etc/beam` is `root:root` mode 750, so the `beam` user cannot search it; the cert files may also still be `root:root`. Fix: `sudo chown root:beam /etc/beam /etc/beam/wcp.crt /etc/beam/wcp.key /etc/beam/beam.env`, then `sudo chmod 750 /etc/beam; sudo chmod 644 /etc/beam/wcp.crt; sudo chmod 640 /etc/beam/wcp.key /etc/beam/beam.env`. Verify with `sudo -u beam cat /etc/beam/wcp.key > /dev/null` before restarting |
 | Rank stuck in Tier E | Usually CPU-bound during bursts. Raise worker memory/bandwidth limits, confirm BBR, then apply the day-14 rule |
 | Zero incentive but delivering work | Run `./06-check-penalty.sh` — likely a zeroed penalty multiplier |
@@ -1126,6 +1154,7 @@ curl -X DELETE https://beamcore.b1m.ai/orchestrators/history \
 | `Permissions 0644 for 'id_ed25519_beam' are too open` | `chmod 600 ~/.ssh/id_ed25519_beam` |
 | `Too many authentication failures` | SSH offered every key you own before the right one. Add `IdentitiesOnly yes` to the host block (Step 4a-bis) |
 | `ssh-copy-id: ERROR: No identities found` | Name the key explicitly: `ssh-copy-id -i ~/.ssh/id_ed25519_beam.pub ops@IP` |
+| `sudo: a terminal is required to read the password` | A command passed to `ssh` has no TTY. Use `ssh -t host 'sudo ...'` |
 | `sh: 1: cannot create .ssh/authorized_keys: Permission denied` | `/home/ops/.ssh` exists but is root-owned — it was made with a plain `mkdir` as root. Fix from root: `chown -R ops:ops /home/ops && chmod 700 /home/ops/.ssh`, then re-run `ssh-copy-id`. If `/home/ops` is missing entirely (`useradd` without `-m`), create it first: `install -d -m 750 -o ops -g ops /home/ops` |
 | `chmod: cannot access '/root/deploy/*.sh': No such file or directory` | The glob is expanded by your shell as `ops`, which cannot read mode-700 `/root`. Let root expand it: `sudo sh -c 'chmod +x /root/deploy/*.sh'`. Confirm the files arrived with `sudo ls -l /root/deploy` |
 | SSH drops during the Step 7 build | Idle timeout. The `ServerAlive*` lines in Step 4a-bis, plus `tmux` on the VPS |
@@ -1173,6 +1202,12 @@ discipline, VPS hardening, `btcli wallet sign` instead of custom tooling, `-trim
 valuably — the existence of
 [beam-core-public](https://github.com/Beam-Network/beam-core-public), which let both passes verify
 the scoring logic against Beam's own source rather than inferring it.
+
+**Corrected against the compiled binary (build `8be314b`):** Beam's `docs/orchestrator.md` and
+the reference guide both document the orchestrator health endpoint as
+`GET /v1/orchestrator/health`. That route does not exist — `internal/orchestrator/server`
+registers `GET /healthz` at the root. Everything else in that namespace, `memberships` included,
+matches the docs. Trust the route table over the documentation.
 
 **Added here:** `--allow-public-network-listeners` (defaults false, gates room listeners), the
 two-address trap, TCP/BBR tuning with BDP rationale, penalty classification and permanence,

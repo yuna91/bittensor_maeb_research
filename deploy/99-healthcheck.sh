@@ -48,6 +48,16 @@ for p in 8780 8781; do
   else warn "nothing listening on $p"; fi
 done
 
+# Liveness, from the route table of the compiled binary: GET /healthz at the ROOT, not under
+# /v1/orchestrator/. The published docs say /v1/orchestrator/health; that route does not exist
+# and returns 404.
+HC="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8781/healthz 2>/dev/null || echo 000)"
+case "$HC" in
+  200) pass "orchestrator /healthz returned 200" ;;
+  000) fail "orchestrator control API not answering on 127.0.0.1:8781" ;;
+  *)   warn "orchestrator /healthz returned HTTP $HC" ;;
+esac
+
 section "The two-address trap"
 # BEAMCORE_GATEWAY_URL must be public; BEAM_WCP_ADDRESS should be loopback. Six of the 50
 # orchestrators in Beam's live routing table get this backwards and receive no work.
