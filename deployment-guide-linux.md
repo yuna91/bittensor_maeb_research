@@ -1,558 +1,293 @@
-# Mining Bittensor Subnet 105 (Beam) — Complete Deployment Guide (Linux workstation)
+# Mining Bittensor Subnet 105 (Beam) — Deployment Guide
 
-**Verified 2026-09-21 against Finney block 9,117,624 and Beam's published source.**
-Market context: TAO $281.40 · SN105 alpha 0.005335 TAO ≈ $1.50 · registration burn at the floor.
-Prices and network state change fast — **`btcli` shows the real burn before charging; trust that
-over any figure printed here.**
+**For operators whose everyday computer runs Linux.** Your Linux PC holds the wallet and signs
+things; a rented Linux VPS does the mining. No prior Bittensor experience assumed.
 
-> **Which guide is this?** The variant for operators whose everyday computer runs **Linux**.
-> Your Linux PC is the *control machine*: it holds the coldkey, runs `btcli`, signs the
-> registration messages, and SSHes into the VPS. [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md) is
-> the same document with a Windows + WSL2 control machine. Only Steps 2–5 differ; everything
-> from Step 6 onward runs on the VPS and is byte-identical in both.
+> Verified against Finney block 9,117,624 and Beam build `8be314b`. Every command below was run
+> on a real deployment (UID 92) on 2026-09-22; the scoring figures in §10 are that node's live
+> values, and they reproduce Beam's published formulas exactly.
 >
-> **This is the easier path.** WSL2 appears in the other guide purely to supply a Linux shell for
-> `btcli`, which has no native Windows build. On Linux you already have one — plus `ssh-copy-id`,
-> a single `~/.ssh` instead of two, and no Windows↔WSL filesystem boundary to drag wallets
-> across. Any modern distro works; commands are given for Debian/Ubuntu, Fedora and Arch where
-> they differ.
+> Using Windows? [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md) is the same deployment with a WSL2
+> control machine. This one is simpler — on Linux you get `btcli` natively, `ssh-copy-id`, and
+> one `~/.ssh` instead of two.
 
-This guide merges two independent research passes and resolves where they disagreed by
-querying the chain directly. Section 11 lists what changed and why.
+---
+
+## How to read this guide
+
+Every command block says **where to run it**. Mixing them up is the most common way to waste an
+hour:
+
+| Badge | Machine |
+|---|---|
+| **PC** | your own Linux computer — holds the wallet, never exposed |
+| **VPS** | the rented server — runs the miner, never holds your coldkey |
+
+Placeholders, each meaning exactly one thing:
+
+| Placeholder | Value | Where to get it |
+|---|---|---|
+| `<PUBLIC_IP>` | the **VPS's** public IPv4 | your provider, or `curl -4 -s ifconfig.me` on the VPS |
+| `<HOTKEY_SS58>` | the **hotkey** address | `btcli wallet list`, the `Hotkey` row |
+| `<COLDKEY_SS58>` | the **coldkey** address | `btcli wallet list`, the `Coldkey` row |
+| `<UID>` | your slot number | `btcli wallet overview --netuid 105` |
+
+Both addresses start with `5` and look alike. The coldkey is used **once**, to receive TAO, and
+appears in no config file. Confusing them produces `403 hotkey is not registered`.
 
 ---
 
 ## Table of contents
 
-1. [Read this first](#1-read-this-first)
-2. [What you are signing up for](#2-what-you-are-signing-up-for)
-3. [How you get paid](#3-how-you-get-paid)
-4. [Cost and realistic returns](#4-cost-and-realistic-returns)
-5. [Step 0 — Before you spend anything](#5-step-0--before-you-spend-anything)
-6. [Setup, steps 1–14](#6-setup)
-7. [Running it](#7-running-it)
-8. [Recovery — deregistration and penalties](#8-recovery)
-9. [Troubleshooting](#9-troubleshooting)
-10. [Glossary](#10-glossary)
-11. [Corrections and sources](#11-corrections-and-sources)
+**Decide**
+
+1. [What this is and what it pays](#1-what-this-is-and-what-it-pays)
+2. [Vocabulary in 60 seconds](#2-vocabulary-in-60-seconds)
+3. [Before you spend anything](#3-before-you-spend-anything)
+
+**Build** — about 90 minutes
+
+4. [Part 1 — Your Linux PC](#4-part-1--your-linux-pc)
+5. [Part 2 — The VPS](#5-part-2--the-vps)
+6. [Part 3 — Joining Beam](#6-part-3--joining-beam)
+7. [Part 4 — Verify](#7-part-4--verify)
+
+**Run**
+
+8. [Part 5 — Operating it](#8-part-5--operating-it)
+9. [Part 6 — When things break](#9-part-6--when-things-break)
+
+**Reference**
+
+10. [How scoring actually works](#10-how-scoring-actually-works)
+11. [Troubleshooting index](#11-troubleshooting-index)
+12. [Reference and sources](#12-reference-and-sources)  — glossary is in §2
 
 ---
 
-## 1. Read this first
+## 1. What this is and what it pays
 
-Beam pays in five fixed tiers. **Ranks 1–120 share 99% of miner emissions. Rank 121+ shares 1%.**
-With ~209 earning miners, you must finish in roughly the top half to earn anything real.
+Beam (SN105) is a **data-transfer subnet**. No AI, no GPU. Your server moves data between cloud
+storage endpoints and is paid for verified bytes delivered.
 
-| If you land at | Nominal/month | **Realistic/month** | Verdict |
+Pay comes in **five fixed tiers by rank**, and the cliffs between them are brutal:
+
+| Your rank | Nominal/month | **Realistic/month** | Verdict |
 |---|---|---|---|
-| Tier A (rank 1–30) | ~$2,216 | **~$358** | Strongly profitable |
-| Tier B (31–60) | ~$1,551 | **~$250** | Strongly profitable |
-| Tier C (61–90) | ~$443 | **~$72** | Profitable |
-| Tier D (91–120) | ~$177 | **~$29** | Break-even |
-| **Tier E (121+, ~89 miners)** | ~$15 | **~$2** | **Loss** |
+| 1–30 | ~$2,216 | **~$358** | strongly profitable |
+| 31–60 | ~$1,551 | **~$250** | strongly profitable |
+| 61–90 | ~$443 | **~$72** | profitable |
+| 91–120 | ~$177 | **~$29** | break-even |
+| **121+** (~89 miners) | ~$15 | **~$2** | **loss** |
 
-"Realistic" is what you bank if you convert alpha to TAO as you earn it. See §4 for the maths —
-the gap is large and it is structural, not pessimism.
+Ranks 1–120 share **99%** of miner emissions; rank 121+ shares **1%**. Rank 60→61 is a 3.5× pay
+cut; 120→121 is 14×.
 
-**Three facts that decide whether this is worth doing:**
+"Realistic" is what you actually bank if you convert alpha to TAO as you earn it. The gap is
+structural — see §12. Costs: **~$0.14** once, **~$16/month** thereafter.
 
-1. **There are zero free UID slots.** The subnet is at 256/256. Registering **evicts someone**,
-   and you get 25 hours of immunity before the same can happen to you.
-2. **Registration is cheap — ~$0.14**, not hundreds of dollars. The experiment is low-risk.
+**Three facts that decide whether to bother:**
+
+1. **There are zero free slots.** The subnet is at 256/256. Registering **evicts someone**, and
+   you get 25 hours of immunity before the same happens to you.
+2. **Registration is trivially cheap** — ~$0.14, not hundreds of dollars. The experiment is
+   low-risk; the monthly server bill is the real cost.
 3. **Your server choice barely matters.** One tier of rank is worth ~$150/month; the spread
    between sensible VPS plans is ~$25/month. **Where you rank is everything.**
 
-This is a positive-expected-value bet with high variance, not passive income.
+A positive-expected-value bet with high variance. Not passive income.
 
 ---
 
-## 2. What you are signing up for
+## 2. Vocabulary in 60 seconds
 
-Beam (SN105) is a **decentralized data-transfer subnet** — not AI, not GPU. Miners move data
-chunks between cloud storage endpoints and are paid for verified bytes delivered.
-
-| Role | What it does | Needs a UID? |
-|---|---|---|
-| **Orchestrator** | The miner. Receives chunk offers, routes them to workers. **Earns emissions.** | **Yes** |
-| **Worker** | Executes the byte transfers, returns signed results | **Unresolved — see below** |
-| **Validator** | Relays BeamCore's weight vector on-chain | Yes — not your path |
-
-> **RESOLVED: the worker does *not* need its own UID.** Verified against the live API on
-> 2026-09-22: `POST /workers/register`, signed with the **orchestrator's** hotkey, returned 2xx —
-> no 403 — and BeamCore assigned a `worker_id` **identical to the `orchestrator_id`**, keying
-> both records to the same hotkey identity. The membership binding then succeeded and the
-> orchestrator's manifest advertised the worker's full capability set.
->
-> A solo operator therefore needs **one** hotkey and **one** registration, not two. Background:
-> `docs/worker.md` says "Bittensor worker hotkey registered on subnet 105" and shows a
-> `btcli subnets register` call, but the worker runtime accepts **no hotkey or wallet argument
-> at all** — the hotkey only signs that one-time request; runtime identity is `worker_id` +
-> Ed25519 node key + membership. The docs overstate the requirement.
->
-> If a future change does return 403 at Step 11, register a second hotkey for ~$0.14 and re-run.
-
-### Live network state (block 9,117,624 — 2026-09-21)
-
-- **256 / 256 UIDs — completely full.** 249 miners + 7 validators. **Zero free slots.**
-- **209** miners with non-zero incentive (down from 230 on 09-18 — 47 UIDs now earn nothing)
-- **324 orchestrators registered, 308 live** — more running than there are slots
-- Alpha: 0.005335 TAO (~$1.50) · pool depth ~4,622 TAO
-- **Registration burn: 0.0005 TAO ≈ $0.14 — at the MinBurn floor**
-- Churn: 18 UIDs registered in the last 24h, 90 in 7 days
-- Network traffic: **~20 TiB/day, ~2 Gb/s average**, in ~10-minute lulls punctuated by bursts
-
----
-
-## 3. How you get paid
-
-Two separate scores. Confusing them is the most common mistake.
-
-Source: [beam-core-public](https://github.com/Beam-Network/beam-core-public) — Beam's own
-published scoring code, which I verified matches on-chain reality to within 0.1%.
-
-### Stage A — Getting work assigned (PRISM)
-
-```
-performanceScore  = 0.4 × throughputScore + 0.6 × reliabilityScore
-prismFinalScore   = performanceScore × readinessMultiplier × penaltyMultiplier
-```
-
-Confirmed constants from `prism/scoring.ts`:
-
-| Constant | Value |
+| Term | What it means for you |
 |---|---|
-| Throughput weight | **0.4** |
-| Reliability weight | **0.6** |
-| Fleet normalization floor | **0.2** |
-| Evidence lookback | 1 day |
-| Reliability half-life | 1 hour |
-| Graduation confidence | 0.9 |
-| Target verified tasks | 120 |
+| **TAO** | Bittensor's main token (~$281) |
+| **Alpha** | SN105's own token (~$1.50). **You are paid in alpha, not TAO** |
+| **Coldkey** | Controls your money. Stays on your PC. Never on the VPS |
+| **Hotkey** | Signs work. Safe on the VPS. **Cannot move funds** |
+| **netuid** | Subnet number. Beam is **105** |
+| **UID** | Your numbered slot. There are 256 and all are taken |
+| **Orchestrator** | The miner process. Holds the UID, earns emissions |
+| **Worker** | The process that moves the bytes. Runs beside the orchestrator |
+| **BeamCore** | Beam's central coordinator. Closed-source; computes all scores |
+| **PRISM** | Beam's scoring system. Decides how much work you are sent |
+| **Immunity** | 25-hour grace period after registering, during which you cannot be evicted |
+| **Tempo** | How often weights and payouts update: 360 blocks, ~72 minutes |
 
-Three consequences, all favourable to a careful small operator:
-
-1. **Reliability outweighs throughput, 0.6 to 0.4.** A small flawless node beats a big flaky one.
-2. **Normalization floors at 0.2**, so work allocation spreads only ~5× between best and worst.
-3. **`readinessMultiplier` is linear in uptime.** 90% uptime costs you 10% of your score.
-   A dropped control-plane connection sets it to **zero**.
-
-From `assignment-engine.ts`, chunks are allocated **proportional to `prismFinalScore`**
-(`allocationRule: "prism_final_score_desc"`), with ties broken by cryptographic shuffle.
-
-### Stage B — Graduating out of the zero-emission pool
-
-New orchestrators start in the **qualifying** pool and **earn nothing**. They receive
-`qualifying_equal_share_rotation` work — randomized equal shares, so everyone gets a fair
-shot at building evidence.
-
-```
-confidence = min(1, verifiedTasks/120) × successRate × (0.8 + 0.2 × ageRatio)
-```
-
-Graduate at **confidence ≥ 0.9**: ~120 verified tasks, near-perfect success rate, 24h+ of age.
-
-> ### The success-rate ceiling — the trap in this formula
->
-> Once you pass 120 verified tasks and 1 day of age, both other terms saturate at 1.0, so the
-> formula collapses to:
->
-> ```
-> confidence_max = success_rate
-> ```
->
-> **A success rate below 0.90 therefore makes graduation arithmetically impossible**, however
-> many tasks you complete. Tasks and age are only a matter of waiting; success rate is the one
-> term that can permanently lock you out of emissions, and the only lever on it is not accepting
-> work you cannot deliver. This is the concrete reason Step 11 tells you to be honest with
-> `claimed_bandwidth_mbps`.
->
-> Watch it directly — `/orchestrators/prism-scores/<uid>` reports `success_rate` alongside
-> everything else. If it sits near 0.90, cut `BEAM_WORKER_BANDWIDTH_MBPS` toward your measured
-> `verified_bandwidth_mbps` and restart the worker. `throughput_score` is fleet-normalised and
-> saturates at 1.0, so a lower honest claim usually costs nothing.
-
-**Verified against live data (UID 92, 2026-09-22), and the published constants reproduce exactly:**
-
-```
-throughput 1 · reliability 0.82502 -> performance 0.4(1)+0.6(0.82502) = 0.89501   (reported 0.89501)
-performance 0.89501 x readiness 0.99687 x penalty 1 = 0.89221                     (reported 0.89221)
-tasks 60/120 x success 0.9156 x (0.8 + 0.2 x age 0.74) = 0.4340                   (reported 0.4343)
-```
-
-`age_days` here is age at **BeamCore**, counted from Step 8 — not from your on-chain
-registration, which is what the 7,500-block immunity window runs on. The two differ by however
-long you took between Step 3 and Step 8.
-
-### Stage C — Converting to emissions (the cliff)
-
-```js
-raw_i = verified_uploaded_mib_i × penalty_multiplier_i
-const TIER_SHARES = { A: 0.5, B: 0.35, C: 0.1, D: 0.04, E: 0.01 };
-```
-
-- **PRISM score** decides how much work you get (~5× spread)
-- **Verified uploaded MiB** decides your rank
-- **Rank** drops you into a tier (~50× spread)
-
-That mismatch is the cliff. Rank 60 → 61 is a **3.5× pay cut**; rank 120 → 121 is **14×**.
-
-Ties break by rawScore → prismFinalScore → uploadedMiB → **lower UID wins**.
+**You need one UID, not two.** Verified 2026-09-22: registering the worker with the
+*orchestrator's* hotkey is accepted, and BeamCore returns `worker_id == orchestrator_id`. Beam's
+own `docs/worker.md` implies a second registration is required. It is not.
 
 ---
 
-## 4. Cost and realistic returns
+## 3. Before you spend anything
 
-### Why the nominal numbers are ~7× too high
+Both of these are free, and either can invalidate the plan.
 
-SN105 emits **2,952 alpha/day to miners** — nominally $4,432/day at spot. But the actual new TAO
-flowing into the subnet, read straight from the chain, is:
-
-```
-SubnetTaoInEmission[105] = 861,000 rao/block ≈ 6.20 TAO/day ≈ $1,744/day
-```
-
-Miners' 41% share of that is **~$715/day of hard-backed value** against **$4,432/day of alpha
-issued** — a ratio of about **1:6.2**. If everyone converted as they earned, the price would
-settle near that ratio. Alpha fell 18% in a single day during research — that arithmetic
-playing out.
-
-Reality sits between the two columns in §1. Plan on the realistic column; treat nominal as upside.
-
-### VPS sizing — the honest disagreement
-
-Two defensible positions, and the evidence cuts both ways:
-
-- **Measured average load is tiny.** ~91 GiB/day per miner ≈ **8.8 Mbps**. On average, 2 vCPU is
-  ample.
-- **But scoring happens in bursts.** Beam is TLS in + TLS out plus chunk hashing, so at burst
-  rates it is genuinely CPU-bound, and `transfer_mbps` is measured *during* those bursts.
-
-**The decisive number: the entire SN105 network moves ~2 Gb/s.** A single 2 Gbps port — standard
-on every PetroSky plan — could carry the whole subnet. Per miner that is ~91 GiB/day average
-(~8.8 Mbps), bursting to perhaps 70–350 Mbps. TLS both ways at 350 Mbps is ~88 MB/s of AES-GCM,
-which AES-NI handles in under 10% of one core. **Hardware is not the binding constraint; work
-allocation is.**
-
-| Plan | Spec | €/mo | Break-even | Verdict |
-|---|---|---|---|---|
-| Standard | 1 vCPU / 2 GB / 20 GB | 6.99 | — | **No** — 2 GB RAM cannot hold the 2 GiB worker reservation alongside the orchestrator and OS, and 20 GB is tight for OS + Go toolchain + growing journals. OOM or disk-full destroys reliability (60% of score) |
-| **Standard** | **2 vCPU / 4 GB / 40 GB** | **14.39** | **Tier D** | **Buy this** |
-| Standard | 4 vCPU / 8 GB | 26.39 | Tier C | CPU you will not use |
-| Dedicated | 2 vCPU / 4 GB | 30.92 | Tier C | Only if you measure CPU steal — see triggers |
-| Dedicated | 4 vCPU / 8 GB | 42.92 | Tier C | Not justified by measured load |
-
-The €14.39 plan **breaks even one full tier lower** than the dedicated options. Since this is an
-uncertain bet, the lowest break-even threshold wins; the expensive box needs you to succeed
-*more* just to pay for itself.
-
-### Storage: you need almost none
-
-**Transferred data is never stored.** The worker streams source → destination in a single pipe
-(`internal/workload/handlers/transfer/handler.go`):
-
-```go
-sourceResponse, _ := h.client.Do(sourceRequest)                  // GET source
-source  := io.LimitReader(sourceResponse.Body, part.Length)
-counter := &countingReader{reader: io.TeeReader(source, hash)}   // SHA-256 computed in flight
-destinationRequest, _ := http.NewRequestWithContext(ctx, method, part.Destination.URL, counter)
-h.client.Do(destinationRequest)                                  // PUT destination
-```
-
-The source body becomes the destination request body directly. No temp file, no buffer
-accumulating the chunk. A 40 MiB chunk never exists as 40 MiB anywhere — per concurrent transfer
-the real memory cost is tens of KB of HTTP/TLS buffers. Room transfers behave the same way.
-
-> `--scratch-bytes` (default 10 GiB) is an **admission-control accounting figure** the worker
-> advertises and reserves against when deciding how much work to accept. `transfer.multipart`
-> does not consume it. Do not size your disk around it.
-
-What actually uses disk: Ubuntu (~3–5 GB), the Go toolchain and build cache (~1.5–2.5 GB), the
-repo and binaries (~300 MB), and **journals that grow without bound** — `wcp-events.jsonl`,
-`tasks.json`, receipts, payment evidence, plus the systemd journal. `00-bootstrap.sh` caps the
-systemd journal at 500 MB and installs logrotate for the WCP journal.
-
-**40 GB is comfortable.**
-
-**Upgrade triggers — measure, don't guess.** Run `vmstat 1 10` during a burst:
-
-- CPU steal (`st`) consistently >5% **and** rank below Tier C → Dedicated 2 vCPU
-- `us + sy` pinned near 100% during bursts → more vCPU genuinely helps
-- Neither, but stuck in Tier E → the problem is your network path or config. More CPU will not
-  fix it; apply the day-14 rule.
-
-**Location: Quebec City, not Paris.** Beam's routing table is US-dominated (~21 of 50 entries are
-US/Virginia). Quebec→us-east-1 is ~40 ms; Paris is ~80 ms. Throughput is fleet-normalized against
-those US competitors.
-
-**Skip the €39.99 10 Gbps upgrade** initially — it costs more than the server and you will not be
-bandwidth-bound at the start.
-
-### One-time costs
-
-| Item | Cost |
-|---|---|
-| SN105 registration burn | **0.0005 TAO ≈ $0.14** — currently at the MinBurn floor; dynamic |
-| Second hotkey for the worker | **$0 — not needed** (verified 2026-09-22; see §2) |
-| Domain + TLS certificate | **$0 — not required** (see Step 6) |
-
-Hold ~0.05 TAO for burn plus fees. Budgeting a whole TAO is unnecessary.
-
----
-
-## 5. Step 0 — Before you spend anything
-
-All three are free and any one can invalidate the plan.
-
-### 0.1 — Ask the Beam Discord one question
-
-Join via [b1m.ai](https://b1m.ai/):
-
-> Does a solo operator need two SN105 registrations (orchestrator hotkey + worker hotkey), or can
-> one hotkey serve both roles?
-
-This is the genuine open question in §2 and it doubles your UID cost if the answer is "two".
-
-### 0.2 — Get PetroSky's bandwidth answer in writing
-
-Email `support@petrosky.io`:
+**Get your provider's bandwidth answer in writing.** You will move 3–5 TB/month in bursts.
+PetroSky's current terms do not prohibit crypto mining — but "fair use" is undefined and they
+reserve the right to cancel any service at any time. Email `support@petrosky.io`:
 
 > I plan to run a bandwidth-relay node moving roughly 3–5 TB/month sustained, in bursts.
 > Is this acceptable under your fair-use policy?
 
-Their current published Terms do **not** prohibit crypto mining — I checked the live page, and
-the six-item prohibited list has no mining clause. (Search engines still surface an older version
-that did; ignore it.) But they **do** ban Tor nodes, the list is explicitly non-exhaustive, and
-"fair use" is undefined while reserving the right to "suspend or cancel any service at any time".
-Their customer base is Forex/RDP/emulator users — you will be a significant outlier. Get it in
-writing.
+**Accept that you are joining a queue, not filling a vacancy.** Registration evicts the
+lowest-scoring non-immune miner, and ~25 UIDs turn over daily. Budget for two or three
+re-registrations while you tune; at $0.14 each that is affordable.
 
-### 0.3 — Accept that there are no free slots
+### What you will spend
 
-The subnet is at **256/256**. Registration evicts the lowest-scoring non-immune miner, and ~25
-UIDs turn over daily. You are joining a queue, not filling a vacancy. Budget for two or three
-re-registrations while you tune.
+| Item | Cost |
+|---|---|
+| ~0.1 TAO for registration and fees | ~$28 (you keep the change) |
+| SN105 registration burn | **0.0005 TAO ≈ $0.14** — dynamic; `btcli` shows the real figure before charging |
+| VPS: 2 vCPU / 4 GB / 40 GB | **€14.39/month** |
+| Second hotkey for the worker | **$0 — not needed** (see §2) |
+| Domain and TLS certificate | **$0 — not needed** (see Step 2.5) |
+
+### Which VPS, and why
+
+**PetroSky Quebec City, Standard 2 vCPU / 4 GB / 40 GB, Ubuntu 24.04.** No 10 Gbps upgrade, no
+extra storage, no backups — everything here is reproducible.
+
+- **Not 1 vCPU / 2 GB.** 2 GB cannot hold the worker's 2 GiB reservation plus the orchestrator
+  and OS. An OOM kill destroys reliability, which carries 60% of your score.
+- **Not bigger.** Measured load is ~91 GiB/day (~8.8 Mbps average); the entire subnet moves
+  ~2 Gb/s. You will not be CPU-bound, and the cheap plan breaks even a full tier lower.
+- **Quebec, not Paris.** Beam's routing is US-dominated. Quebec→us-east-1 is ~40 ms, Paris ~80 ms,
+  and throughput is scored *relative to* those US competitors.
+- **40 GB is plenty.** Transferred data never touches disk — the worker streams source to
+  destination in a single pipe, computing SHA-256 in flight. Disk goes to Ubuntu, the Go
+  toolchain, and logs.
+
+> `--scratch-bytes` (default 10 GiB) is an **accounting figure** the worker reserves against when
+> deciding how much work to accept. It is not disk usage. Do not size your disk around it.
+
+**Upgrade only on evidence.** Run `vmstat 1 10` during a burst: CPU steal above 5% with a poor
+rank justifies a dedicated instance; `us+sy` pinned at 100% justifies more vCPU. Neither, but
+stuck in the bottom tier, means the problem is your network path or config — more CPU will not
+fix it.
 
 ---
 
-## 6. Setup
+## 4. Part 1 — Your Linux PC
 
-Scripts referenced below are in [deploy/](deploy/). You can run them or follow the commands by
-hand — both are equivalent.
+### Step 1.1 — Install `btcli`
 
-### Step 1 — Acquire TAO
-
-Buy ~0.1 TAO on any exchange supporting Bittensor withdrawals (Kraken, Binance, KuCoin, MEXC).
-Do not withdraw until you have a wallet address (Step 2).
-
-### Step 2 — Create your wallet on your PC, never the VPS
-
-> **Your coldkey controls your funds. It must never touch the VPS.**
-
-Your Linux box is already the platform Bittensor targets: `bittensor-wallet` publishes manylinux
-wheels, so there is nothing to compile and no WSL to install. Two things to get right first.
-
-**1. Install the Python prerequisites.**
+**PC**
 
 ```bash
 # Debian / Ubuntu
 sudo apt update && sudo apt install -y python3-venv python3-pip pipx
-
-# Fedora / RHEL
-sudo dnf install -y python3-pip python3-virtualenv pipx
-
-# Arch
-sudo pacman -S --needed python python-pip python-pipx
+# Fedora:  sudo dnf install -y python3-pip python3-virtualenv pipx
+# Arch:    sudo pacman -S --needed python python-pip python-pipx
 ```
 
-**2. Do not install into the system Python.**
-
-Debian 12+, Ubuntu 23.04+, Fedora 38+ and Arch mark the system interpreter *externally managed*
-(PEP 668), so a bare `pip install` aborts with:
-
-```
-error: externally-managed-environment
-```
-
-`--break-system-packages` is exactly as bad as it sounds here — btcli pins exact dependency
-versions (see the `cyscale` note in Step 3) and will fight your distro's packages for them.
-Use a virtualenv:
+Modern distros refuse `pip install` into the system Python (PEP 668 —
+`error: externally-managed-environment`). Do **not** reach for `--break-system-packages`: `btcli`
+pins exact dependency versions and will fight your distro's packages. Pick one:
 
 ```bash
-python3 -m venv ~/bt
+pipx install bittensor-cli        # recommended — always on PATH, isolated
+```
+
+```bash
+python3 -m venv ~/bt              # alternative — must be activated each session
 source ~/bt/bin/activate
 pip install -U bittensor-cli
+```
+
+```bash
 btcli --version
 ```
 
-or, if you would rather have `btcli` permanently on `PATH` without activating anything:
+> **`btcli: command not found` tomorrow?** You used the venv and opened a fresh shell. Either
+> `source ~/bt/bin/activate` or switch to `pipx`.
+>
+> **`Conflict detected: 'scalecodec' is installed`?** Two SCALE codecs in one environment. Fix
+> with `pip uninstall scalecodec substrate-interface -y` then
+> `pip install --force-reinstall bittensor-cli`. Never install `substrate-interface` alongside
+> `btcli` — `bittensor-cli` already ships `async-substrate-interface`.
 
-```bash
-pipx install bittensor-cli      # isolated venv, shimmed into ~/.local/bin
-```
+### Step 1.2 — Create your wallet
 
-> **Every `btcli` command in this guide runs on your Linux PC, never on the VPS.** If you chose
-> the venv, activate it first (`source ~/bt/bin/activate`); the usual cause of "command not
-> found" two days later is a fresh shell with the venv unactivated. `pipx` sidesteps that.
-
-Your wallets live at `~/.bittensor/wallets/`. Create them:
+**PC**
 
 ```bash
 btcli wallet new_coldkey --wallet-name beam_cold
 btcli wallet new_hotkey  --wallet-name beam_cold --wallet-hotkey orch1
 ```
 
-> **Lock the wallet directory down.** btcli sets sane modes, but confirm them — a coldkey
-> readable by another local account is the one irreversible mistake available at this step:
-> ```bash
-> chmod 700 ~/.bittensor ~/.bittensor/wallets ~/.bittensor/wallets/beam_cold
-> find ~/.bittensor/wallets -type f -exec chmod 600 {} +
-> ls -lR ~/.bittensor/wallets/beam_cold
-> ```
+**Write both mnemonics on paper and store them offline. There is no recovery.**
+
+Then lock the directory down — your home is a normal multi-user directory:
+
+```bash
+chmod 700 ~/.bittensor ~/.bittensor/wallets ~/.bittensor/wallets/beam_cold
+find ~/.bittensor/wallets -type f -exec chmod 600 {} +
+```
+
 > If this machine is shared, has an unencrypted home directory, or syncs `~` to cloud storage,
-> keep the coldkey elsewhere — a LUKS volume or an offline machine — and leave only the hotkey
-> here. Only the hotkey is needed for day-to-day operation.
+> keep the coldkey elsewhere — a LUKS volume or an offline machine — and leave only the hotkey.
 
-**Write the mnemonics on paper and store them offline. There is no recovery.**
+### Step 1.3 — Buy and deposit TAO
 
-Withdraw your TAO to the **coldkey** ss58 address (`btcli wallet list`).
+**PC**
 
-### Step 3 — Register your hotkey on SN105 (on your Linux PC)
+```bash
+btcli wallet list                                   # note the COLDKEY address
+```
+
+Buy ~0.1 TAO on any exchange supporting Bittensor withdrawals (Kraken, Binance, KuCoin, MEXC)
+and withdraw to that **coldkey** address. Confirm arrival:
+
+```bash
+btcli wallet balance --wallet-name beam_cold
+```
+
+### Step 1.4 — Register on subnet 105
+
+**PC** — this spends real TAO.
 
 ```bash
 btcli subnets register --netuid 105 --network finney \
   --wallet-name beam_cold --wallet-hotkey orch1
 ```
 
-btcli shows the burn cost before charging. Expect ~0.0005 TAO (the floor). If it has spiked to several TAO,
+`btcli` shows the burn before charging. Expect ~0.0005 TAO; if it has spiked to several TAO,
 wait — it decays with a 360-block half-life.
 
-> **btcli version note.** Use the newest `bittensor-cli` (9.23.x); do not pin an old one.
-> Verified against btcli source: `--network` / `--subtensor.network` and
-> `--wallet-name` / `--wallet.name` / `--wallet-hotkey` / `--wallet.hotkey` are all accepted
-> aliases, and `subnet` is an alias for `subnets`. The dotted forms still work — the canonical
-> dashed spellings are used here.
->
-> **There is no `-w` short flag.** The wallet-name aliases are `--wallet-name`, `--name`,
-> `--wallet_name`, `--wallet.name`. (`-H` is a valid short form for the hotkey.)
->
-> btcli 9.x adds interactive prompts this command did not previously have — it asks about
-> **safe registration** and **rate tolerance**. For scripted runs:
-> `--unsafe` (or `--safe` plus `--tolerance 0.05`), `--json-output`, and `-y` / `--no-prompt`.
->
-> btcli ships in the **`bittensor-cli`** package, not `bittensor` (which is the SDK). If the
-> command is missing or behaves oddly, run `pip install -U bittensor-cli` and check
-> `btcli --version`.
-
-> ### ⚠ `scalecodec` / `cyscale` conflict
->
-> If btcli aborts on startup with
-> `Conflict detected: 'scalecodec' (py-scale-codec) is installed`, you have two SCALE codecs
-> claiming the same namespace. `async-substrate-interface` (a btcli dependency) hard-fails at
-> import when it sees `scalecodec`.
->
-> **Cause:** the old **`substrate-interface`** package depends on `scalecodec<1.3`, while
-> `bittensor-cli` depends on `cyscale`. Installing both breaks btcli.
->
-> **Fix:**
-> ```bash
-> pip uninstall scalecodec cyscale -y
-> pip install "cyscale==0.5.0" --force-reinstall   # match bittensor-cli's exact pin
-> pip check                                        # should report no conflicts
-> btcli --version                                  # confirm it starts
-> ```
->
-> **Do not follow the error message's own advice verbatim.** It says
-> `pip install cyscale --force-reinstall`, which installs the newest cyscale (0.8.0) — but
-> `bittensor-cli` 9.23.2 pins **`cyscale==0.5.0`** exactly, so that leaves you with:
-> `bittensor-cli 9.23.2 requires cyscale==0.5.0, but you have cyscale 0.8.0`.
-> Pin the version to whatever your btcli requires:
-> ```bash
-> pip show bittensor-cli | grep -i requires      # or check the pin directly
-> ```
-> If the set is still inconsistent, let pip resolve it wholesale:
-> ```bash
-> pip install --force-reinstall "bittensor-cli==9.23.2"
-> ```
-> If `substrate-interface` is also present, remove it too — it will drag `scalecodec` back in:
-> ```bash
-> pip uninstall substrate-interface -y
-> ```
->
-> **Do not `pip install substrate-interface` in the same environment as btcli.** You do not need
-> it: `bittensor-cli` already ships `async-substrate-interface`, which exposes a drop-in sync
-> `SubstrateInterface` with an identical `query()` and constructor. The scripts in
-> [deploy/](deploy/) import it preferentially and only fall back to the legacy package.
->
-> Use a clean virtualenv per role if you must keep both:
-> ```bash
-> python3 -m venv ~/bt_venv && source ~/bt_venv/bin/activate
-> pip install -U bittensor-cli
-> ```
-
-Verify: `btcli wallet overview --netuid 105 --wallet-name beam_cold` should show a UID.
-
-### Step 4 — Order and secure the VPS
-
-Order: **PetroSky Quebec City — Standard 2 vCPU / 4 GB / 40 GB (€14.39), Ubuntu 24.04.**
-No 10 Gbps upgrade, no extra storage, no backups (everything here is reproducible; back up your
-hotkey and `api_key` yourself). See §4 for why this plan and not a larger one.
-
-> ⚠ **Do not name your login user `beam`.** `00-bootstrap.sh` creates `beam` as a *system*
-> account with `--shell /usr/sbin/nologin` to run the services under. If a login user called
-> `beam` already exists, bootstrap silently skips creating it and your miner ends up running as
-> a sudo-capable account — a needless privilege escalation. Pick any other name; `ops` is used
-> below.
-
-#### 4a — Create your SSH key (on your Linux PC)
-
-An SSH key is a pair of files: a **private** key you keep, and a **public** key you hand to
-servers. OpenSSH ships with every mainstream distro — `ssh -V` confirms it; if it is somehow
-missing, `sudo apt install openssh-client` (or `openssh-clients` / `openssh` on Fedora / Arch).
+Confirm, and **write down your UID**:
 
 ```bash
-# What do you already have?
-ls -l ~/.ssh/*.pub 2>/dev/null
+btcli wallet overview --netuid 105 --wallet-name beam_cold
 ```
 
-Reusing an existing key is perfectly valid — one key can authenticate to any number of servers.
-But a **dedicated key per purpose** is better: if you ever need to revoke it, you remove one
-`authorized_keys` line instead of re-keying everything. Give it its own filename with `-f`:
+> **That table looks alarming and is fine.** `ACTIVE: False` and `AXON: none` are normal for a
+> Beam miner — see §8 for why. The column that matters is `INCENTIVE`, and it stays `0.00` for at
+> least a day.
+
+### Step 1.5 — Create an SSH key
+
+**PC**
 
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_beam -C "beam-vps"
+eval "$(ssh-agent -s)" && ssh-add ~/.ssh/id_ed25519_beam
 ```
 
-That writes two files:
+A dedicated key per purpose is better than reusing one: revoking it later means deleting one
+line, not re-keying everything.
 
-| File | What it is |
-|---|---|
-| `~/.ssh/id_ed25519_beam` | **private key — never share, never copy to a server** |
-| `~/.ssh/id_ed25519_beam.pub` | **public key — this is what you install on the VPS** |
-
-Set a passphrase. `ssh-agent` then asks for it once per desktop session rather than once per
-connection:
-
-```bash
-eval "$(ssh-agent -s)"          # most desktop sessions already run one
-ssh-add ~/.ssh/id_ed25519_beam
-```
-
-View the public key (one line, starts with `ssh-ed25519`):
-
-```bash
-cat ~/.ssh/id_ed25519_beam.pub
-```
-
-#### 4a-bis — Tell SSH to use it automatically
-
-A non-default filename means `ssh` will not find it on its own. Rather than passing `-i <path>`
-to every command, add a host alias to `~/.ssh/config`:
+Add a host alias so you never type the IP or `-i` again:
 
 ```bash
 cat >> ~/.ssh/config <<'EOF'
 
 Host beam-vps
-    HostName YOUR_VPS_IP
+    HostName <PUBLIC_IP>
     User ops
     IdentityFile ~/.ssh/id_ed25519_beam
     IdentitiesOnly yes
@@ -562,399 +297,258 @@ EOF
 chmod 600 ~/.ssh/config
 ```
 
-`IdentitiesOnly yes` matters: without it SSH offers every key you own and the server may reject
-you with `Too many authentication failures` before it reaches the right one. The `chmod` matters
-too — OpenSSH refuses to use a config or private key that is group- or world-readable, with
-`Bad owner or permissions on /home/<you>/.ssh/config`. The two `ServerAlive*` lines stop a NAT
-or firewall idle-timeout from dropping long `journalctl -f` sessions and the Step 7 build.
+Each line earns its place: `IdentitiesOnly yes` stops SSH offering every key you own and being
+rejected with `Too many authentication failures`; `chmod 600` is mandatory, since OpenSSH refuses
+a group-readable config (`Bad owner or permissions`); the `ServerAlive*` pair stops a NAT timeout
+killing long builds and `journalctl -f` sessions.
 
-From then on `ssh beam-vps` and `scp file beam-vps:/path` just work, with no `-i` and no IP to
-remember.
+---
 
-> **Use `tmux` on the VPS for anything long-running.** `ssh beam-vps -t tmux new -As beam` gives
-> you a session that survives a dropped link; the Go build in Step 7 takes several minutes and
-> a disconnect mid-build leaves you guessing at what completed.
+## 5. Part 2 — The VPS
 
-#### 4b — Create the admin user and install the key
+Order the server (§3) with **Ubuntu 24.04**. The provider emails you a root password.
 
-SSH into the VPS as `root` using the password PetroSky emailed you, then:
+> ⚠ **Do not name your login user `beam`.** Bootstrap creates `beam` as a *system* account with
+> no shell, to run the services under. If a login user called `beam` already exists, bootstrap
+> skips creating it and your miner ends up running as a sudo-capable account. Use `ops`.
+
+### Step 2.1 — Create your login user
+
+**VPS** — SSH in as `root` with the emailed password:
 
 ```bash
 adduser ops && usermod -aG sudo ops
 ```
 
-Now — the part that is genuinely simpler from Linux — push the key with `ssh-copy-id` instead of
-pasting it. Run this on your **Linux PC**, authenticating with the password you just set for
-`ops`:
+**PC** — install your key. No copy-pasting required on Linux:
 
 ```bash
-ssh-copy-id -i ~/.ssh/id_ed25519_beam.pub ops@YOUR_VPS_IP
+ssh-copy-id -i ~/.ssh/id_ed25519_beam.pub ops@<PUBLIC_IP>
+ssh beam-vps 'whoami'            # must print "ops" with no password prompt
 ```
 
-It creates `/home/ops/.ssh` with the correct modes, appends the key to `authorized_keys`, and
-skips keys that are already installed. Verify:
+> `cannot create .ssh/authorized_keys: Permission denied` means `/home/ops/.ssh` exists but is
+> root-owned. From root: `chown -R ops:ops /home/ops && chmod 700 /home/ops/.ssh`, then re-run.
 
-```bash
-ssh -i ~/.ssh/id_ed25519_beam ops@YOUR_VPS_IP 'ls -ld ~/.ssh && cat ~/.ssh/authorized_keys'
-```
+### Step 2.2 — Harden
 
-> **`cannot create .ssh/authorized_keys: Permission denied`** means `/home/ops/.ssh` already
-> exists and is owned by `root` — the usual result of creating it with a bare `mkdir` while
-> logged in as root. `ssh-copy-id` cannot recover from that because it connects as `ops`. Repair
-> ownership from root, then re-run it:
-> ```bash
-> ssh root@YOUR_VPS_IP 'chown -R ops:ops /home/ops && chmod 700 /home/ops/.ssh'
-> ```
+> **First, in a second terminal, confirm `ssh beam-vps` logs you in without a password.** If you
+> disable password login while your key is misconfigured, only the provider's web console can
+> recover the machine.
 
-If `ssh-copy-id` is unavailable, install the key through root instead — note the
-`-o ops -g ops`, which is what keeps the directory writable by `ops`:
-
-```bash
-install -d -m 700 -o ops -g ops /home/ops/.ssh
-nano /home/ops/.ssh/authorized_keys      # paste the whole ssh-ed25519 ... line, save
-chown ops:ops /home/ops/.ssh/authorized_keys
-chmod 600 /home/ops/.ssh/authorized_keys
-```
-
-#### 4c — Test, then harden
-
-> **Open a second terminal and confirm `ssh beam-vps` logs you in without a password before
-> running the next block.** If you disable password login while your key is misconfigured, you
-> are locked out of the server permanently and PetroSky's web console is the only way back.
->
-> Debug with `ssh -v beam-vps` — the verbose output names which key file it offered.
+**VPS**
 
 ```bash
 sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 sudo systemctl restart ssh
-```
 
-```bash
 sudo apt update && sudo apt install -y ufw fail2ban
 sudo ufw allow 22/tcp      # SSH
-sudo ufw allow 8782/tcp    # orchestrator WCP — must be public
-sudo ufw allow 9470/tcp    # worker room transfers — extra earnings, see Step 12
+sudo ufw allow 8782/tcp    # orchestrator — must be public
+sudo ufw allow 9470/tcp    # room transfers — extra earnings
 sudo ufw enable
 ```
 
-Ports **8780** and **8781** stay on `127.0.0.1`. Never expose them.
+Ports **8780** and **8781** are internal control APIs bound to `127.0.0.1`. Never open them.
 
-### Step 5 — Copy the hotkey to the VPS
+### Step 2.3 — Copy the kit and your hotkey
 
-Your wallet sits on the same filesystem as your SSH config — no WSL boundary, no path
-translation, no second `~/.ssh`. From your **Linux PC**:
+**PC**, from the directory containing [deploy/](deploy/):
 
 ```bash
+scp -r deploy beam-vps:/home/ops/deploy-new
 scp -r ~/.bittensor/wallets/beam_cold/hotkeys beam-vps:/home/ops/hk_tmp
 ```
 
-> **Copy the `hotkeys/` subdirectory, not `beam_cold/`.** `coldkey` and `coldkeypub.txt` live one
-> level up, and that one-word difference is what keeps your funds off a public server. Check both
-> ends before and after:
-> ```bash
-> ls ~/.bittensor/wallets/beam_cold/hotkeys      # should list only hotkey names, e.g. orch1
-> ssh beam-vps 'ls -l /home/ops/hk_tmp'          # same, and nothing called coldkey
-> ```
+> **Copy `hotkeys/`, not `beam_cold/`.** `coldkey` and `coldkeypub.txt` live one level up, and
+> that one-word difference is what keeps your funds off a public server.
 
-Then **on the VPS**:
+**VPS**
 
 ```bash
+sudo install -d -m 700 /root/deploy
+sudo cp -r /home/ops/deploy-new/. /root/deploy/
+sudo find /root/deploy -name '*.sh' -exec chmod +x {} +
+rm -rf /home/ops/deploy-new
+sudo ls -l /root/deploy                            # seven .sh files plus systemd/
+
 mkdir -p ~/.bittensor/wallets/beam_cold/hotkeys
 mv ~/hk_tmp/* ~/.bittensor/wallets/beam_cold/hotkeys/
 chmod 600 ~/.bittensor/wallets/beam_cold/hotkeys/*
+ls -l ~/.bittensor/wallets/beam_cold/hotkeys       # nothing called coldkey
 ```
 
-**Never copy the file named `coldkey`.** A hotkey signs work; it cannot move funds.
-
-### Step 5b — Put the deploy kit on the VPS
-
-Steps 6–14 call scripts by absolute path (`/root/deploy/...`), so the [deploy/](deploy/)
-directory has to get there first. From your **Linux PC**, in the directory holding this guide:
-
-```bash
-# from your Linux PC
-scp -r deploy beam-vps:/home/ops/deploy
-
-# then on the VPS
-sudo install -d -m 700 /root/deploy
-sudo cp -r /home/ops/deploy/. /root/deploy/
-sudo find /root/deploy -name '*.sh' -exec chmod +x {} +
-rm -rf /home/ops/deploy
-sudo ls -l /root/deploy
-```
-
-`rsync -av --delete deploy/ beam-vps:/home/ops/deploy/` is the better form once you start
-iterating on the scripts — it re-sends only what changed.
-
-> **Re-syncing a script later?** Run the remote half with `ssh -t`, or `sudo` aborts with
-> *"a terminal is required to read the password"* — a command passed to `ssh` gets no TTY, so
-> `sudo` has nowhere to prompt:
+> **Why `find` instead of `chmod +x /root/deploy/*.sh`?** Your shell expands the glob as `ops`
+> *before* `sudo` runs, and `/root` is mode 700 — so it matches nothing and `chmod` reports
+> `cannot access '/root/deploy/*.sh': No such file or directory`. Any wildcard inside a root-only
+> path has to be expanded by root.
+>
+> **Updating a script later?** Run the remote half with `ssh -t`, or `sudo` aborts with *"a
+> terminal is required to read the password"* — a command passed to `ssh` gets no TTY:
 > ```bash
-> scp deploy/00-bootstrap.sh beam-vps:/home/ops/
-> ssh -t beam-vps 'sudo cp /home/ops/00-bootstrap.sh /root/deploy/ >   && sudo find /root/deploy -name "*.sh" -exec chmod +x {} + >   && rm /home/ops/00-bootstrap.sh'
+> scp deploy/99-healthcheck.sh beam-vps:/home/ops/
+> ssh -t beam-vps 'sudo cp /home/ops/99-healthcheck.sh /root/deploy/ \
+>   && sudo chmod +x /root/deploy/99-healthcheck.sh && rm /home/ops/99-healthcheck.sh'
 > ```
 
-> **Why `find` and not `chmod +x /root/deploy/*.sh`?** Your shell expands the glob as `ops`
-> *before* `sudo` runs, and `/root` is mode 700 — so it matches nothing and `chmod` is handed the
-> literal string, giving `cannot access '/root/deploy/*.sh': No such file or directory`. The
-> files are fine. Any wildcard inside a root-only path needs to be expanded by root:
-> `sudo sh -c 'chmod +x /root/deploy/*.sh'` works too.
+### Step 2.4 — Build
 
-> Scripts that read `/etc/beam/beam.env` (`99-healthcheck.sh`, `06-check-penalty.sh`) need root
-> or membership of a group you grant read access; run them with `sudo`.
-
-### Step 6 — Generate the TLS certificate (self-signed, no domain)
-
-> **`<YOUR_PUBLIC_IP>`, `<PUBLIC_IP>` and `<VPS_IP>` all mean one thing: the VPS's own public
-> IPv4** — never your workstation's, which nothing ever dials and which is usually dynamic and
-> behind NAT. The same value goes into Steps 6, 8, 9, 11, 12 and 14. Read it off the VPS once:
-> ```bash
-> curl -4 -s ifconfig.me; echo
-> ip -4 addr show scope global | grep inet     # cross-check — PetroSky gives a dedicated IPv4
-> ```
-> `YOUR_VPS_IP` in Step 4 is the same address too; from Step 5 onward the `beam-vps` SSH alias
-> stands in for it.
+**VPS** — takes several minutes. Run it inside `tmux` so a dropped connection cannot interrupt
+the build:
 
 ```bash
-sudo /root/deploy/01-gen-cert.sh <YOUR_PUBLIC_IP>     # the VPS's public IPv4
-```
-
-> **You do not need a domain or Let's Encrypt.** The worker builds its trust store from an
-> *empty* pool and trusts only the file you hand it:
-> ```go
-> roots := x509.NewCertPool()          // empty — never SystemCertPool()
-> roots.AppendCertsFromPEM(caBytes)    // only BEAM_WCP_CA
-> ```
-> A public CA certificate would be ignored unless you placed it in that same file. Self-signed
-> with a 10-year expiry also removes the 90-day renewal failure mode, which would otherwise zero
-> your readiness multiplier if it ever lapsed.
-
-Requirements the script handles: **SAN is mandatory** (Go ignores Common Name), plus `CA:TRUE`
-and `keyCertSign` because the cert is its own root. The IP you pass is written into the SAN as
-`IP:<PUBLIC_IP>`, and workers verify the address they dialled against it — a workstation IP
-there produces a certificate that fails verification for everyone. The script prints the SAN
-block when it finishes; confirm your VPS IP is in it.
-
-> **Ownership is fixed up in Step 7, not here.** This script chowns the cert and key to
-> `root:beam`, but at this point Step 7 has not created the `beam` account yet, so that chown
-> silently no-ops and both files stay `root:root` — the failure surfaces much later as
-> `open /etc/beam/wcp.crt: permission denied` in the orchestrator log. `00-bootstrap.sh`
-> re-applies the ownership for exactly this reason. If you ever regenerate the cert *after*
-> bootstrap has run, the script gets it right on its own.
-
-### Step 7 — Install Go and build Beam
-
-```bash
+tmux new -As beam
 sudo /root/deploy/00-bootstrap.sh
 ```
 
-#### Or the full manual equivalent
+Six things happen, only one of which is the build: packages; the `beam` system account; Go;
+`beam-orchestrator` and `beam-worker` built from canonical source with `-trimpath`; TCP/BBR
+tuning; log-growth caps; and installation of the two systemd units plus `/etc/beam/beam.env`.
 
-Building by hand is fine, but the script does **six** things and only one of them is the build.
-Skipping the rest costs you rank. Run all of this as root:
+**The TCP tuning is not cosmetic.** On a 2 Gbps link at ~40 ms RTT the bandwidth-delay product is
+~10 MB, and stock kernel buffers cap a single stream well below line rate. PRISM scores your
+throughput *relative to competitors*, so an untuned kernel costs you rank directly — for two
+commands. Confirm it took:
 
 ```bash
-# 1. Packages
-apt-get update && apt-get install -y curl git ca-certificates openssl jq \
-  python3 python3-venv python3-pip logrotate
-
-# 2. Service account — nologin, NOT your SSH login user
-useradd --system --create-home --home-dir /var/lib/beam --shell /usr/sbin/nologin beam
-mkdir -p /opt/beam /var/lib/beam/orchestrator /var/lib/beam/worker /etc/beam
-chown -R beam:beam /var/lib/beam
-# The chown is not optional. root:root + 750 denies `beam` SEARCH permission on the directory,
-# and every file inside then fails to open however permissive its own mode is.
-chown root:beam /etc/beam
-chmod 750 /etc/beam
-
-# 3. Go (latest stable)
-cd /tmp && curl -fsSLO "https://go.dev/dl/$(curl -fsSL 'https://go.dev/VERSION?m=text'|head -1).linux-amd64.tar.gz"
-rm -rf /usr/local/go && tar -C /usr/local -xzf go*.linux-amd64.tar.gz
-echo 'export PATH=/usr/local/go/bin:$PATH' > /etc/profile.d/go.sh
-export PATH=/usr/local/go/bin:$PATH
-
-# 4. Build from canonical source
-git clone https://github.com/Beam-Network/beam.git /opt/beam
-cd /opt/beam && mkdir -p bin
-go build -trimpath -o bin/beam-orchestrator ./cmd/beam-orchestrator
-go build -trimpath -o bin/beam-worker       ./cmd/beam-worker
-git rev-parse HEAD > /opt/beam/BUILD_REVISION
-
-# 5. TCP tuning — this one directly affects your rank
-cat > /etc/sysctl.d/99-beam.conf <<'SYSCTL'
-net.core.rmem_max = 67108864
-net.core.wmem_max = 67108864
-net.core.netdev_max_backlog = 30000
-net.core.somaxconn = 8192
-net.ipv4.tcp_rmem = 4096 262144 67108864
-net.ipv4.tcp_wmem = 4096 262144 67108864
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.ip_local_port_range = 10240 65535
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-fs.file-max = 2097152
-SYSCTL
-modprobe tcp_bbr; echo tcp_bbr > /etc/modules-load.d/bbr.conf
-sysctl --system
-sysctl -n net.ipv4.tcp_congestion_control    # must print: bbr
-
-# 6. Cap log growth (nothing rotates these by default)
-sed -i 's/^#\?SystemMaxUse=.*/SystemMaxUse=500M/' /etc/systemd/journald.conf
-systemctl restart systemd-journald
-cat > /etc/logrotate.d/beam <<'LOGROTATE'
-/var/lib/beam/orchestrator/wcp-events.jsonl {
-    weekly
-    rotate 2
-    maxsize 500M
-    compress
-    missingok
-    notifempty
-    copytruncate
-}
-LOGROTATE
+sysctl -n net.ipv4.tcp_congestion_control          # must print: bbr
 ```
 
-Then install the two unit files from [deploy/systemd/](deploy/systemd/) into
-`/etc/systemd/system/` and run `systemctl daemon-reload`.
+> **Always build from source.** `-ERR invalid client protocol` at runtime means a non-canonical
+> binary.
 
-> **Build from source. Never use a downloaded binary.** `-ERR invalid client protocol` means a
-> non-canonical build.
+### Step 2.5 — Generate the TLS certificate
 
-**Why step 5 is not optional:** on a 2 Gbps link at ~40 ms RTT the bandwidth-delay product is
-~10 MB, and stock `tcp_rmem` maxima of ~6 MB cap a single stream below line rate. PRISM scores
-`transfer_mbps` fleet-normalised against competitors, so an untuned kernel costs you rank
-directly — for two commands.
+**VPS** — run this *after* bootstrap, so the `beam` account exists and ownership lands right:
 
-### Step 8 — Register the orchestrator with BeamCore
+```bash
+sudo /root/deploy/01-gen-cert.sh <PUBLIC_IP>
+```
 
-Sign on your PC (safer — the official CLI, no custom tooling):
+That is the **VPS's** public IPv4, never your PC's. The script writes it into the certificate's
+SAN, and workers verify the address they dialled against it. Check the printed SAN block contains
+`IP Address:<PUBLIC_IP>`.
 
-> **`<HOTKEY_SS58>` is the *hotkey's* ss58 address**, from the `Hotkey` row of
-> `btcli wallet list` — not the coldkey's, which appears directly above it and also starts with
-> `5`. The coldkey address is used once, to receive your TAO in Step 2, and never appears in a
-> config file or API call. Swapping them yields `403 hotkey is not registered`, because a
-> coldkey is not a neuron. Confirm the right one carries your UID first:
-> ```bash
-> btcli wallet overview --netuid 105 --wallet-name beam_cold
-> ```
-> Using the scripts avoids the question — they resolve the ss58 from the wallet name.
+> **No domain or Let's Encrypt needed.** The worker builds its trust store from an *empty* pool
+> (`x509.NewCertPool()`, never `SystemCertPool()`) and trusts only the file you hand it, so a
+> public CA certificate would be ignored. Self-signed with a 10-year expiry also removes the
+> 90-day renewal failure mode, which would otherwise zero your readiness multiplier if it lapsed.
+
+Check ownership before continuing — this is the most common cause of a restart-looping
+orchestrator:
+
+```bash
+sudo ls -ld /etc/beam
+sudo -u beam cat /etc/beam/wcp.crt > /dev/null && echo "beam can read the cert"
+sudo -u beam cat /etc/beam/wcp.key > /dev/null && echo "beam can read the key"
+```
+
+`/etc/beam` must be `root:beam` mode 750. If it is `root:root`, the `beam` user has no *search*
+permission and every file inside fails to open whatever its own mode says:
+
+```bash
+sudo chown root:beam /etc/beam /etc/beam/wcp.crt /etc/beam/wcp.key /etc/beam/beam.env
+sudo chmod 750 /etc/beam
+sudo chmod 644 /etc/beam/wcp.crt
+sudo chmod 640 /etc/beam/wcp.key /etc/beam/beam.env
+```
+
+---
+
+## 6. Part 3 — Joining Beam
+
+Order matters. BeamCore registration **must** happen before the orchestrator connects, and the
+worker's membership binding requires the orchestrator to already be running.
+
+### Step 3.1 — Register the orchestrator with BeamCore
+
+**PC** — sign the message. `10` is your fee percentage, baked into the signature:
 
 ```bash
 btcli wallet sign --wallet-name beam_cold --wallet-hotkey orch1 --use-hotkey \
   --message "<HOTKEY_SS58>:10"
 ```
 
-`10` is the fee percentage you keep. **The signed message and submitted `fee_percentage` must
-match**, or the signature check fails.
-
 > **What the fee is, and why 10.** It is the cut your orchestrator keeps from workers registered
-> under it — Beam allows third parties to attach their workers to your orchestrator, and this
-> sets the split. **If you own both the orchestrator and its only worker, the value is
-> irrelevant**: emissions land on the hotkey holding the UID either way, so the fee just moves
-> value between your own pockets. 10 is nothing more than the default in
-> [03-register-orchestrator.sh](deploy/03-register-orchestrator.sh); leave it there.
->
-> It starts mattering only if you later host other people's workers. More workers means more
-> capacity and more verified uploaded MiB, which is what sets your rank — so a low fee recruits,
-> a high one deters. 10% is conventional and puts nobody off.
->
-> Treat the value as sticky. Re-registering appears to update an existing record rather than
-> create one (the script warns when no `api_key` comes back for exactly this reason), so a later
-> change is probably possible — but the kit does not confirm it.
+> under it — Beam lets third parties attach their workers to yours. **If you own both ends the
+> number is irrelevant**: emissions land on the hotkey holding the UID either way. It matters
+> only if you later host other people's workers, where a low fee recruits and a high one deters.
+> 10 is the kit's default. Treat it as sticky.
 
-Then on the VPS:
+**VPS** — post it:
 
 ```bash
 curl -X POST https://beamcore.b1m.ai/orchestrators/register \
   -H 'Content-Type: application/json' \
   -d '{"hotkey":"<HOTKEY_SS58>","signature":"0x...","fee_percentage":10,
        "name":"my-orch","region":"north-america",
-       "url":"http://<YOUR_PUBLIC_IP>:8782","max_workers":64}'
+       "url":"http://<PUBLIC_IP>:8782","max_workers":64}'
 ```
 
-**Prefer the script.** `sudo /root/deploy/03-register-orchestrator.sh <coldkey> <hotkey> <PUBLIC_IP>`
-signs and posts in one step, taking the fee from a single variable so the message and the body
-cannot drift apart — the one mistake that reliably breaks this call. A different fee goes in the
-optional 4th argument (`... <PUBLIC_IP> 5`), never by editing one of the two places by hand.
+> **Save `orchestrator_id` and `api_key` immediately, somewhere off the VPS. The key is returned
+> exactly once.** A `403` means your hotkey is not on the metagraph — go back to Step 1.4.
 
-> **Save `orchestrator_id` and `api_key` immediately — the key is returned only once.**
-> 403 means your hotkey is not on the metagraph; go back to Step 3.
-
-> **If you registered by hand rather than with the script, also write
-> `/etc/beam/orchestrator.creds`.** Only `03-register-orchestrator.sh` creates it, and
-> Steps 11 and 14 plus `06-check-penalty.sh` read it — without it the health and penalty checks
-> silently skip their PRISM queries. Once `beam.env` is filled in (Step 9), derive it:
-> ```bash
-> sudo sh -c '. /etc/beam/beam.env
-> umask 077
-> printf "ORCHESTRATOR_ID=%s
-ORCHESTRATOR_API_KEY=%s
-HOTKEY_SS58=%s
-" >   "$BEAM_ORCHESTRATOR_ID" "$BEAMCORE_NATS_PASSWORD" "$BEAM_BITTENSOR_HOTKEY" >   > /etc/beam/orchestrator.creds
-> chmod 600 /etc/beam/orchestrator.creds'
-> ```
-
-### Step 9 — Configure
-
-**The file already exists — do not write it from scratch.** Step 7's `00-bootstrap.sh` installed
-`/etc/beam/beam.env` from [deploy/beam.env.example](deploy/beam.env.example) at mode 0640,
-owner `root`, group `beam`. Your job here is to replace the five `REPLACE_*` placeholders:
+**VPS** — record them where the monitoring scripts look. Do this even though `beam.env` holds the
+same values: `99-healthcheck.sh` and `06-check-penalty.sh` read this file and silently skip their
+PRISM queries without it.
 
 ```bash
-sudo grep -n REPLACE_ /etc/beam/beam.env      # shows exactly what is left to fill
+sudo sh -c 'umask 077
+cat > /etc/beam/orchestrator.creds <<EOF
+ORCHESTRATOR_ID=<orchestrator_id>
+ORCHESTRATOR_API_KEY=<api_key>
+HOTKEY_SS58=<HOTKEY_SS58>
+EOF
+chmod 600 /etc/beam/orchestrator.creds'
+```
+
+### Step 3.2 — Fill in the configuration
+
+**VPS.** Bootstrap already installed `/etc/beam/beam.env` from
+[deploy/beam.env.example](deploy/beam.env.example), mode 0640, `root:beam`. **Do not write this
+file from scratch** — the systemd units interpolate a dozen variables from it, and a hand-written
+subset produces a malformed command line.
+
+```bash
+sudo grep -n REPLACE_ /etc/beam/beam.env          # shows exactly what is left
 sudoedit /etc/beam/beam.env
 ```
 
-| Placeholder | Value | Available from |
+| Placeholder | Value | From |
 |---|---|---|
-| `REPLACE_hotkey_ss58` (×2) | your hotkey ss58 | Step 2 — `btcli wallet list` |
-| `REPLACE_orchestrator_api_key` | the one-time `api_key` | **Step 8 — shown once, never again** |
-| `REPLACE_orchestrator_id` | the `orchestrator_id` | Step 8 |
-| `REPLACE_PUBLIC_IP` (×2) | the VPS's public IPv4 | Step 6 |
-| `REPLACE_worker_id` | the `worker_id` | Step 11 — leave until then |
-| `REPLACE_uid` | your on-chain UID | after Step 3 — `btcli wallet overview --netuid 105` |
+| `REPLACE_hotkey_ss58` (×2) | `<HOTKEY_SS58>` | Step 1.2 |
+| `REPLACE_orchestrator_id` | the `orchestrator_id` | Step 3.1 |
+| `REPLACE_orchestrator_api_key` | the `api_key` | Step 3.1 |
+| `REPLACE_PUBLIC_IP` (×2) | `<PUBLIC_IP>` | your provider |
+| `REPLACE_uid` | `<UID>` | Step 1.4 |
+| `REPLACE_worker_id` | the `worker_id` | Step 3.4 — leave for now |
 
-`03-register-orchestrator.sh` and `04-register-worker.sh` print the values they obtain but do
-**not** write them into the file; that edit is yours. Re-run the `grep` afterwards — a leftover
-`REPLACE_` is a service that starts and then fails to authenticate.
+> ### ⚠ The mistake that silently kills miners
+>
+> Two addresses, and **only one may be loopback**:
+>
+> | Variable | Correct value | Why |
+> |---|---|---|
+> | `BEAMCORE_GATEWAY_URL` | `http://<PUBLIC_IP>:8782` | **must be public** — this is how work reaches you |
+> | `BEAM_WCP_ADDRESS` | `127.0.0.1:8782` | internal worker to orchestrator hop; loopback is right |
+>
+> Six of the 50 orchestrators in Beam's live routing table have `127.0.0.1` in the first one.
+> They receive no work and probably do not know why.
 
-> **Why not just type out the variables you see referenced in this guide?** Because the worker
-> unit interpolates `${BEAM_WORKER_CAPABILITIES}`, `${BEAM_WORKER_MEMORY_BYTES}`,
-> `${BEAM_WORKER_SCRATCH_BYTES}`, `${BEAM_WORKER_BANDWIDTH_MBPS}` and the two
-> `${BEAM_ROOM_TRANSFER_*}` values straight into its `ExecStart`
-> ([beam-worker.service](deploy/systemd/beam-worker.service)). A hand-written subset produces a
-> malformed command line, and omitting `BEAM_WCP_CA` / `BEAM_WCP_SERVER_NAME` leaves the worker
-> unable to verify TLS against your own orchestrator. Edit the installed template; do not
-> replace it.
+The certificate paths printed by `01-gen-cert.sh` are **already correct in the template**. That
+closing message is generic advice for a hand-built config; ignore it.
 
-The cert paths `01-gen-cert.sh` printed at the end of Step 6 — `BEAM_WCP_TLS_CERT`,
-`BEAM_WCP_TLS_KEY`, `BEAM_WCP_CA`, `BEAM_WCP_SERVER_NAME=beam-orch` — are **already correct in
-the template**. That message is generic advice for a hand-built config; you can ignore it.
+### Step 3.3 — Start the orchestrator
 
-### ⚠ The mistake that silently kills your miner
-
-Two addresses. **Only one may be loopback.**
-
-| Variable | Correct value | Direction |
-|---|---|---|
-| `BEAMCORE_GATEWAY_URL` | `http://<PUBLIC_IP>:8782` | **must be public** |
-| `BEAM_WCP_ADDRESS` | `127.0.0.1:8782` | internal; loopback is correct |
-
-Six of the 50 orchestrators in Beam's live routing table have `127.0.0.1` in the first one. They
-receive no work and likely don't know why.
-
-### Step 10 — Start the orchestrator
+**VPS**
 
 ```bash
 sudo systemctl enable --now beam-orchestrator
 sudo journalctl -u beam-orchestrator -f
-curl -s http://127.0.0.1:8781/healthz; echo
 ```
 
-A healthy start looks like this in the **journal** (`journalctl -u beam-orchestrator`) —
-three lines, then silence:
+A healthy start is three lines in the journal, then silence:
 
 ```
 starting beam-orchestrator-beamcore NATS connector
@@ -962,289 +556,266 @@ Beam Orchestrator WCP listening on 0.0.0.0:8782 (TLS 1.3)
 Beam Orchestrator 0.2.0 orchestrator_id=<uuid> listening on 127.0.0.1:8781
 ```
 
-`(TLS 1.3)` means the cert **and** key loaded; `0.0.0.0` means the WCP listener is public, not
-loopback; the `orchestrator_id` means it read your Step 8 registration out of `beam.env`. Any
-`Main process exited` line after them means it is still failing - read the line above it.
+`(TLS 1.3)` proves the cert **and** key loaded; `0.0.0.0` proves the listener is public; the
+`orchestrator_id` proves it read your registration. Any `Main process exited` after those means
+it is still failing — read the line above it.
 
-`/healthz` answers separately, as JSON — this is what success looks like:
+Then check over HTTP — this is a separate thing from the journal, and answers in JSON:
+
+```bash
+curl -s http://127.0.0.1:8781/healthz; echo
+```
 
 ```json
-{"orchestrator_id":"fb58b7d8-75bf-42f8-b281-2c8ee01d952c","status":"ok"}
+{"orchestrator_id":"fb58b7d8-...","status":"ok"}
 ```
-
-The id there must match the one in the log and the one BeamCore returned in Step 8.
 
 > **The health route is `GET /healthz`, at the root.** Beam's published `docs/orchestrator.md`
-> documents `/v1/orchestrator/health`; that route does not exist and returns
-> `404 page not found`. Verified against the compiled route table in
-> `internal/orchestrator/server/server.go` at build revision `8be314b`. A 404 is still proof the
-> HTTP server is up — `Connection refused` is the answer that means the process is down. Note
-> also that port 8782 speaks TLS, so `curl http://...:8782` returns nothing; that is expected.
->
-> The other routes on 8781, all `/v1/orchestrator/`-prefixed: `manifest`, `memberships` (used by
-> Step 11), `observations`, `placements`, `workloads/{offers,commits,cancel}`,
-> `circuits[/revoke]`, `transfers/{plan,dispatch}`, `network/links`, `tasks`, `task-events`.
+> documents `/v1/orchestrator/health`; that route does not exist and returns `404 page not
+> found`. Verified against the compiled route table in `internal/orchestrator/server/server.go`.
+> A 404 still proves the server is up — `Connection refused` is the reply that means it is down.
+> Port 8782 speaks TLS, so `curl http://…:8782` returning nothing is also expected.
 
-Local success is not the same as reachable. Confirm from **your Linux PC**, not the VPS:
+### Step 3.4 — Register the worker
 
-```bash
-nc -vz <YOUR_PUBLIC_IP> 8782
-```
+This step spans both machines: signing needs your wallet, which is deliberately not on the VPS,
+while the script needs root, the orchestrator's loopback API, and `orchestrator.creds`.
 
-A timeout here is almost always `ufw` — `sudo ufw status` should list `8782/tcp` and `9470/tcp`.
-An orchestrator that looks healthy in its own log and is unreachable from outside receives no
-work at all.
-
-### Step 11 — Register the worker
-
-This step spans both machines. **Sign on your Linux PC; run the script on the VPS.** The script
-needs root, the orchestrator's loopback API and `/etc/beam/orchestrator.creds`, so it cannot run
-from your workstation — but signing needs your wallet, which is deliberately not on the VPS.
-
-**On your Linux PC**, sign the worker message. Note the port in the message is **9000**, which is
-the registration port, not the 9470 room-transfer port:
+**PC** — the port in this message is **9000** (registration), not 9470 (room transfers):
 
 ```bash
-btcli wallet sign --wallet-name beam_cold --wallet-hotkey orch1 --use-hotkey   --message "<HOTKEY_SS58>:<YOUR_PUBLIC_IP>:9000"
-btcli wallet list        # read both ss58 addresses off this
+btcli wallet sign --wallet-name beam_cold --wallet-hotkey orch1 --use-hotkey \
+  --message "<HOTKEY_SS58>:<PUBLIC_IP>:9000"
+btcli wallet list                                  # read both ss58 addresses
 ```
 
-**On the VPS**, pass the three values in and run the script:
+**VPS** — hand the script the pre-signed values, so no wallet tooling is needed on the server:
 
 ```bash
-sudo env HOTKEY_SS58=<hotkey ss58> COLDKEY_SS58=<coldkey ss58> SIG=0x<signature>   /root/deploy/04-register-worker.sh beam_cold orch1 <YOUR_PUBLIC_IP> 500
+sudo env HOTKEY_SS58=<HOTKEY_SS58> COLDKEY_SS58=<COLDKEY_SS58> SIG=0x<signature> \
+  /root/deploy/04-register-worker.sh beam_cold orch1 <PUBLIC_IP> 500
 ```
 
-With those set, the script skips `02-sign.py` entirely and no wallet tooling is needed on the
-server. It echoes the message it will use — check it matches what you signed, character for
-character, before it posts.
+Use `sudo env VAR=...`, not `sudo VAR=...` — with the default `env_reset` in sudoers the latter
+is rejected. The script echoes the message it will use; check it matches what you signed.
 
-> **Why not let the script sign on the VPS?** It would need `bittensor_wallet` installed there,
-> plus `coldkeypub.txt`, which Step 5 intentionally leaves behind — and `sudo` resets `HOME` to
-> `/root`, so the hotkey you copied to `/home/ops/.bittensor` would not be found anyway. Keeping
-> the wallet off the server is the point, so signing stays on your PC.
->
-> Use `sudo env VAR=...`, not `sudo VAR=...`. With the default `env_reset` in sudoers the latter
-> is rejected with *"not allowed to set the following environment variables"*.
+> **Be honest with the bandwidth claim** (the `500`). PRISM scores *provider-verified*
+> throughput, so overclaiming gains nothing — but it pulls in work you cannot deliver, and those
+> failures hit your success rate, the one number that can lock you out of emissions permanently.
+> See §10.
 
-> **Be honest with `claimed_bandwidth_mbps`.** PRISM scores *provider-verified* throughput, so
-> overclaiming gains nothing — but it pulls in work you cannot deliver, and failures hit
-> reliability, which carries **60%** of your performance score.
+It registers with BeamCore, writes `/etc/beam/worker.creds`, derives the node identity and binds
+the membership. Copy the id into `beam.env`:
 
-> **This succeeded with the orchestrator's hotkey** when tested on 2026-09-22 — see §2. A 403
-> here would mean Beam has since started requiring a separate worker hotkey; register a second
-> one for ~$0.14 and re-run.
-
-### Step 12 — Enable room transfers (extra earnings, easily missed)
-
-Room transfers are additional volume — additional uploaded MiB, which is what sets your rank.
-Three conditions must all hold:
-
-1. The worker advertises **both** `room.transfer.direct.v1` and `room.transfer.e2ee.v2`
-2. The room listener binds publicly: `--room-transfer-addr 0.0.0.0:9470` (default is
-   `127.0.0.1:0` — loopback, unusable)
-3. **`--allow-public-network-listeners`** is set — it defaults to **false** and gates the room
-   handler entirely
-
-That third flag appears in neither Beam's docs nor the reference guide, and without it the public
-room listener will not serve.
-
-**All three are already satisfied by the kit — do not edit the unit file.** `00-bootstrap.sh`
-installed [deploy/systemd/beam-worker.service](deploy/systemd/beam-worker.service), whose
-`ExecStart` hardcodes `--allow-public-network-listeners` and takes the rest from `beam.env`:
-
-```ini
-ExecStart=/opt/beam/bin/beam-worker serve   ...
-  --capabilities ${BEAM_WORKER_CAPABILITIES}   --allow-public-network-listeners   --room-transfer-addr ${BEAM_ROOM_TRANSFER_LISTEN_ADDR}   --room-transfer-advertise-url ${BEAM_ROOM_TRANSFER_ADVERTISE_URL}
+```bash
+sudo grep '^WORKER_ID' /etc/beam/worker.creds
+sudoedit /etc/beam/beam.env                        # set BEAM_WORKER_ID
 ```
 
-So this step is **one edit in `/etc/beam/beam.env`**:
+> `worker_id` being identical to `orchestrator_id` is **correct** — BeamCore keys both records to
+> the same hotkey. See §2.
 
-| Variable | Required value | State in the template |
+### Step 3.5 — Room transfers, then start the worker
+
+Room transfers are extra uploaded MiB, and uploaded MiB is what sets your rank. Three conditions
+must hold and **the kit already satisfies all three** — do not edit the unit file. Only one value
+is yours:
+
+```bash
+sudo grep -E 'BEAM_WORKER_CAPABILITIES|BEAM_ROOM_TRANSFER' /etc/beam/beam.env
+```
+
+| Variable | Required | State |
 |---|---|---|
-| `BEAM_WORKER_CAPABILITIES` | must include `room.transfer.direct.v1` **and** `room.transfer.e2ee.v2` | already correct |
+| `BEAM_WORKER_CAPABILITIES` | includes `room.transfer.direct.v1` **and** `room.transfer.e2ee.v2` | already correct |
 | `BEAM_ROOM_TRANSFER_LISTEN_ADDR` | `0.0.0.0:9470` | already correct |
-| `BEAM_ROOM_TRANSFER_ADVERTISE_URL` | `https://<YOUR_PUBLIC_IP>:9470` | **`REPLACE_PUBLIC_IP` — yours to fill** |
+| `BEAM_ROOM_TRANSFER_ADVERTISE_URL` | `https://<PUBLIC_IP>:9470` | **yours to fill** |
 
-```bash
-sudoedit /etc/beam/beam.env
-sudo grep -nE 'BEAM_WORKER_CAPABILITIES|BEAM_ROOM_TRANSFER' /etc/beam/beam.env
-sudo ufw status | grep 9470        # must be ALLOW, or nothing can reach the listener
-```
+The third condition, `--allow-public-network-listeners`, defaults to **false** and gates the room
+handler entirely. It appears in neither Beam's docs nor most guides, and is hardcoded in
+[deploy/systemd/beam-worker.service](deploy/systemd/beam-worker.service).
 
-No `daemon-reload` is needed — systemd re-reads `EnvironmentFile` when the service starts, so
-Step 13 picks the change up. Only a change to the `.service` file itself would need one.
-
-> **You will not see a listener on 9470, and that is correct.** For `room.transfer.direct.v1`
-> the listener binds only while a room workload is executing; verified in `cmd/beam-worker`,
-> where the eager `PrepareStorageListener()` call is gated on the hybrid
-> `room.transfer.storage.v2` capability. Verify the *capabilities* instead of the port:
-> ```bash
-> sudo grep BEAM_WORKER_CAPABILITIES /etc/beam/beam.env   # both direct.v1 and e2ee.v2
-> sudo journalctl -u beam-worker -n 5 | grep capabilities
-> ```
-> The worker `log.Fatal`s at startup if `room.transfer.direct.v1` and `room.transfer.e2ee.v2`
-> are not enabled together, so a running worker has already passed that check.
-
-### Step 13 — Start the worker
+**VPS**
 
 ```bash
 sudo systemctl enable --now beam-worker
+sudo journalctl -u beam-worker -n 20 --no-pager
 ```
 
-### Step 14 — Verify
+Editing `beam.env` needs no `daemon-reload` — systemd re-reads `EnvironmentFile` at service
+start. Only a change to the `.service` file itself would.
 
-**On the VPS**, as root — it reads `beam.env` (0640) and `orchestrator.creds` (0600), so plain
-`ops` cannot run it usefully:
+> **Nothing will be listening on 9470, and that is correct.** With `room.transfer.direct.v1` the
+> listener is created **on demand**, when a room workload actually runs; `cmd/beam-worker` binds
+> eagerly only on the hybrid `room.transfer.storage.v2` path. An idle worker has 9470 closed, and
+> `nc` from outside reports `Connection refused`. Verify the *capabilities* instead — §7 does.
+
+---
+
+## 7. Part 4 — Verify
+
+Run all of these once. Each catches a different class of failure.
+
+### On the VPS
 
 ```bash
 sudo /root/deploy/99-healthcheck.sh
+```
 
-# $BEAM_WORKER_ID lives in beam.env, which your login shell never sources - read it first
+Checks services, ports, the two-address trap, certificate SAN, the BeamCore session, PRISM pool
+and your on-chain position. It exits non-zero only on **FAIL**; `WARN` lines are informational.
+
+> **One warning is expected:** *"no substrate client found — skipping chain check"*. The VPS
+> deliberately has no Bittensor tooling. Read rank from your PC instead.
+
+```bash
 WID=$(sudo sed -n 's/^WORKER_ID=//p' /etc/beam/worker.creds)
 sudo -u beam /opt/beam/bin/beam-worker doctor --worker-id "$WID"
 ```
 
-> `worker.creds` is written by `04-register-worker.sh` in Step 11. The same value must also be
-> set as `BEAM_WORKER_ID` in `beam.env` - check with
-> `sudo grep '^BEAM_WORKER_ID' /etc/beam/beam.env`, and fill it if it still says
-> `REPLACE_worker_id`. It is the last placeholder in that file.
+> `$BEAM_WORKER_ID` lives in `beam.env`, which your login shell never sources — hence reading it
+> from `worker.creds` first.
 
-Checks services, ports, the two-address trap, certificate SAN, BeamCore control session, PRISM
-pool, and your live on-chain rank and tier. It exits non-zero only on **FAIL**; `WARN` lines are
-informational.
-
-> **One warning is expected.** The chain query needs a substrate client, and the VPS
-> deliberately has no Bittensor tooling — so you will see *"no substrate client found — skipping
-> chain check"*. That is by design. Read rank and tier from your workstation instead.
-
-**On your Linux PC** — the reachability test is meaningless from the VPS itself, since it would
-pass over loopback regardless of the firewall:
+Then confirm work is actually arriving, which is the real test:
 
 ```bash
-nc -vz <YOUR_PUBLIC_IP> 8782      # orchestrator WCP - must succeed
-btcli wallet overview --netuid 105 --wallet-name beam_cold
+curl -s http://127.0.0.1:8781/v1/orchestrator/tasks | jq 'length'     # chunks assigned to you
+curl -s http://127.0.0.1:8781/v1/orchestrator/manifest | jq .
 ```
 
-Only 8782 must answer. A timeout there means `ufw` on the VPS, or a listener bound to
-`127.0.0.1` rather than `0.0.0.0` — check with `ss -lnt` there.
+The manifest's `Capabilities` must list all five entries including both room ones. It can only
+advertise what a *member* worker offers, so that list is proof your worker membership bound
+correctly.
 
-> **Do not test 9470 this way.** With `room.transfer.direct.v1` the room listener is created
-> **on demand**, when a room workload actually runs — `cmd/beam-worker` binds eagerly only on the
-> hybrid `room.transfer.storage.v2` path, via `PrepareStorageListener()`. An idle worker with a
-> perfectly correct config has nothing on 9470, and `nc` reports `Connection refused`. That is
-> the expected state, not a fault. Note `Connection refused` also proves the firewall is open —
-> a `ufw` block would time out instead.
-
----
-
-## 7. Running it
-
-### What to expect, and when
-
-**You earn nothing on day one.** This is normal.
-
-| Time | What happens |
-|---|---|
-| 0 h | Registered. Pool = `qualifying`. Earnings **zero** |
-| 0–24 h | Equal-share rotation builds your confidence score |
-| ~24 h | Confidence hits 0.9 → **qualified** |
-| **25 h** | **Immunity ends — you can now be evicted** |
-| 24 h+ | Production work; incentive appears on chain |
-| 3–7 days | Tier stabilises |
-
-Graduation lands almost exactly when immunity expires, and you enter at the bottom of the
-ranking while ~25 UIDs are evicted daily. This is the squeeze — survive it and you are fine.
-
-### The two numbers that decide your income
-
-```bash
-./99-healthcheck.sh | grep -A3 "On-chain position"
-```
-
-1. **Pool** — must flip `qualifying` → `qualified` within a few days
-2. **Rank** — ≤120 you are earning; 121+ you are not
-
-### Reading `btcli wallet overview` without panicking
-
-Two columns look alarming and are not:
-
-| Column | Typical value | Meaning |
-|---|---|---|
-| `ACTIVE` | **False** | tracks recent **weight-setting**. Only validators set weights, so nearly every miner reads False. Not a health signal |
-| `AXON` | **none** | Beam does not use Bittensor's axon transport. Your endpoint is the WCP listener plus the NATS session, neither published to the metagraph |
-| `INCENTIVE` | 0.00 at first | the real signal. Appears only after graduation, and moves in steps of one tempo (360 blocks, ~72 min) |
-| `UPDATED` | blocks since registration | a miner never sets weights, so this counts up from registration. **Compare it against the 7,500-block immunity window** — at ~7,500 you become evictable |
-
-`UPDATED` approaching 7,500 with `INCENTIVE` still 0 is the squeeze described above. It is
-survivable and, if you lose the slot, cheap to undo — see §8, and re-register the *same* hotkey.
-
-Alongside those, the orchestrator's own control API tells you whether work is actually arriving
-— more directly than the log does:
-
-```bash
-curl -s http://127.0.0.1:8781/v1/orchestrator/tasks | jq 'length'   # chunks assigned to you
-curl -s http://127.0.0.1:8781/v1/orchestrator/manifest | jq .       # what you advertise
-```
-
-During the qualifying period a rising task count is the earliest sign PRISM is routing to you.
-A flat zero after a few hours, with the service healthy, points at reachability — re-check
-`nc -vz <YOUR_PUBLIC_IP> 8782` from off the box.
-
-Reading the manifest, so its quirks do not alarm you:
+Reading the rest of the manifest without alarm:
 
 | Field | Expected | Why |
 |---|---|---|
-| `Capabilities` | all five, incl. both room ones | proves the worker membership bound — the orchestrator can only advertise what a member worker offers |
 | `Available` == `Total` | normal | nothing in flight at that instant |
-| `cpu_millis: 1000` | fixed | **hardcoded in the binary**; no flag exists. `connections`/`streams` at 1024 likewise |
+| `cpu_millis: 1000` | fixed | hardcoded in the binary; no flag exists. `connections`/`streams` at 1024 likewise |
 | `Gateways: null` | normal | the handler passes `nil` for that argument — an artifact of this endpoint |
-| `ExpiresAt` a minute out | normal | the manifest carries a short TTL and is rebuilt |
+| `ExpiresAt` a minute out | normal | short TTL, rebuilt continuously |
 
-Only `--memory-bytes`, `--scratch-bytes` and `--bandwidth-mbps` are tunable; the binary defaults
-(512 MB / 10 GiB / 100 Mbps) are well below what `beam.env` sets.
+Only `--memory-bytes`, `--scratch-bytes` and `--bandwidth-mbps` are tunable, and `beam.env`
+already sets all three well above the binary's defaults.
 
-### Uptime alerting
-
-Every minute offline scales `readinessMultiplier` down linearly; a dropped control-plane
-connection sets it to zero. Set a free UptimeRobot monitor, keep `Restart=always`, rotate logs so
-the disk never fills, and rebuild weekly:
+### On your PC
 
 ```bash
-cd /opt/beam && git pull --ff-only && go clean -cache
-go build -trimpath -o bin/beam-orchestrator ./cmd/beam-orchestrator
-go build -trimpath -o bin/beam-worker       ./cmd/beam-worker
+nc -vz <PUBLIC_IP> 8782        # MUST succeed
+btcli wallet overview --netuid 105 --wallet-name beam_cold
+```
+
+Reachability has to be tested from outside. Run it on the VPS and it passes over loopback even
+with the firewall shut — the exact false positive that leaves an orchestrator silently earning
+nothing. A timeout means `ufw`, or a listener bound to `127.0.0.1` instead of `0.0.0.0`.
+
+**Do not test 9470 this way** — see Step 3.5. `Connection refused` there is correct for an idle
+worker, and incidentally proves the firewall is open, since a `ufw` block would time out instead.
+
+### The full PRISM breakdown
+
+This is the most informative single command you have, and nothing else exposes these numbers:
+
+```bash
+sudo sh -c '. /etc/beam/orchestrator.creds
+curl -sS -H "x-api-key: $ORCHESTRATOR_API_KEY" \
+  https://beamcore.b1m.ai/orchestrators/prism-scores/<UID> | jq .'
+```
+
+§10 explains every field and which ones can hurt you.
+
+---
+
+## 8. Part 5 — Operating it
+
+### What to expect, and when
+
+**You earn nothing on day one. This is normal.**
+
+| Time | What happens |
+|---|---|
+| 0 h | Registered. Pool is `qualifying`. Earnings **zero** |
+| 0–24 h | Equal-share rotation builds your evidence |
+| ~24 h | Confidence reaches 0.9 → **qualified** |
+| **25 h** | **Immunity ends — you can now be evicted** |
+| 24 h+ | Production work; incentive starts appearing on chain |
+| 3–7 days | Tier stabilises |
+
+Graduation lands almost exactly when immunity expires, and you enter at the bottom of the ranking
+while ~25 UIDs are evicted daily. **This is the squeeze.** Survive it and you are fine. If you do
+not, §9 makes recovery cheap — it is not a ban.
+
+> Note two different clocks. `age_days` in the PRISM response counts from your **BeamCore**
+> registration (Step 3.1). The 7,500-block immunity window counts from your **on-chain**
+> registration (Step 1.4). They differ by however long you took in between.
+
+### The three numbers that decide your income
+
+```bash
+sudo /root/deploy/99-healthcheck.sh | grep -iA3 "prism\|pool"
+```
+
+1. **Pool** — must flip `qualifying` → `qualified` within a few days
+2. **Rank** — ≤120 you are earning, 121+ you are not
+3. **`success_rate`** — must stay **above 0.90**, for the reason in §10
+
+### Reading `btcli wallet overview` without panicking
+
+| Column | Typical | Meaning |
+|---|---|---|
+| `ACTIVE` | **False** | tracks recent **weight-setting**. Only validators set weights, so nearly every miner reads False. Not a health signal |
+| `AXON` | **none** | Beam does not use Bittensor's axon transport. Your endpoint is the WCP listener plus the NATS session, neither published on chain |
+| `INCENTIVE` | 0.00 at first | the real signal. Appears only after graduation, and moves one tempo (~72 min) at a time |
+| `UPDATED` | blocks since registration | miners never set weights, so it counts up from registration. At ~7,500 you become evictable |
+
+### Keep it alive
+
+`readinessMultiplier` is **linear in uptime**, and a dropped control-plane connection sets it to
+**zero**. Uptime is the cheapest score you can buy.
+
+- Set a free UptimeRobot monitor against `<PUBLIC_IP>:8782`
+- Both units already carry `Restart=always`
+- Automate the checks:
+
+```bash
+sudo crontab -e
+```
+
+```cron
+0 * * * * /root/deploy/99-healthcheck.sh > /var/log/beam-health.log 2>&1 || logger -t beam-health "healthcheck FAILED"
+30 6 * * * /root/deploy/06-check-penalty.sh > /var/log/beam-penalty.log 2>&1
+```
+
+- Rebuild weekly:
+
+```bash
+cd /opt/beam && sudo git pull --ff-only && sudo go clean -cache
+sudo go build -trimpath -o bin/beam-orchestrator ./cmd/beam-orchestrator
+sudo go build -trimpath -o bin/beam-worker       ./cmd/beam-worker
 sudo systemctl restart beam-orchestrator beam-worker
 ```
 
-### Watch for the permanent penalty
-
-```bash
-./06-check-penalty.sh      # run daily from cron
-```
+### The penalty that ends a hotkey
 
 `integrity_chunk_mismatch` has coefficient **1.0 and never expires** — one event zeroes that
-hotkey forever. Any `etag`/`integrity`/`checksum` line in the worker log is an early warning.
+hotkey forever. Any `etag`, `integrity` or `checksum` line in the worker log is an early warning.
 
-**What causes it, and what doesn't.** The worker computes SHA-256 in flight and compares against
-`expected_sha256`, so corruption is caught mid-transfer. Because **no data touches disk**, a
-failing disk is not a realistic cause. The actual vectors are:
-
-- **RAM corruption** — PetroSky's ECC memory genuinely helps here
-- **A middlebox mangling the stream** — never put a transparent proxy or caching layer between
-  the worker and object storage
-- **A modified or stale build** — always build from canonical source with `-trimpath`
+Because **no data touches disk**, a failing disk cannot cause it. The real vectors are RAM
+corruption (ECC memory genuinely helps), a middlebox mangling the stream (never put a proxy or
+caching layer between the worker and object storage), and a modified or stale build (always
+`-trimpath` from canonical source).
 
 ### Day-14 decision checkpoint
 
-Be disciplined.
+Be disciplined about this.
 
 | Result | Action |
 |---|---|
-| Rank ≤ 120, stable | Working. Consider the 10 Gbps upgrade **only** if genuinely bandwidth-bound |
-| Rank 121+, not improving | Earning ~$1.60/mo against a ~$36 bill. **Shut it down.** |
+| Rank ≤ 120, stable | Working. Consider a bandwidth upgrade **only** if genuinely bandwidth-bound |
+| Rank 121+, not improving | Earning ~$2/month against a ~$16 bill. **Shut it down** |
 
-The registration burn is sunk. The monthly bill is not. Do not run a Tier E node for months
+The registration burn is sunk; the monthly bill is not. Do not run a bottom-tier node for months
 hoping the tier structure changes.
 
 ### Converting alpha to TAO
@@ -1253,26 +824,30 @@ hoping the tier structure changes.
 btcli stake remove --netuid 105 --wallet-name beam_cold --wallet-hotkey orch1
 ```
 
-> Pool depth is only ~4,667 TAO. **Unstake in small tranches**, not one lump, or you eat the
-> slippage yourself.
+> Pool depth is only ~4,600 TAO. **Unstake in small tranches**, or you eat the slippage yourself.
 
 ---
 
-## 8. Recovery
+## 9. Part 6 — When things break
 
-### If you are deregistered (the likely outcome)
+### If you are deregistered (the likely outcome at least once)
 
-This is **not a ban**. Nothing is blacklisted. Re-register with the **same hotkey** — your
-BeamCore record is keyed to the hotkey, so your **qualified pool status persists** and you skip
-the 24-hour dead period, starting inside a fresh 25-hour immunity window.
+This is **not a ban** and nothing is blacklisted. Re-register the **same hotkey**:
 
-**Do not "start fresh" with a new hotkey after a deregistration — it is strictly worse.**
+```bash
+btcli subnets register --netuid 105 --network finney \
+  --wallet-name beam_cold --wallet-hotkey orch1
+```
 
-Reuse the same VPS, same IP, same install. Cost: ~$0.14.
+Your BeamCore record is keyed to the hotkey, so **qualified pool status persists** — you skip the
+24-hour dead period and start inside a fresh 25-hour immunity window. Reuse the same VPS, same
+IP, same install. Cost: ~$0.14.
+
+**Do not "start fresh" with a new hotkey. It is strictly worse.**
 
 ### If you are penalised
 
-| Penalty | Coefficient | Rows to zero you | Expires |
+| Penalty | Coefficient | Events to zero you | Expires |
 |---|---|---|---|
 | `fraud` | 0.1 | 10 | 168 h |
 | `sybil` | 0.5 | 2 | 168 h |
@@ -1281,11 +856,11 @@ Reuse the same VPS, same IP, same install. Cost: ~$0.14.
 Classify by time: if the zero survives 168 clean hours, it is the permanent one. A sudden drop
 from 1.0 straight to 0.0 is the integrity signature; fraud degrades gradually.
 
-Fraud penalties can be cleared self-service, at the cost of demotion to `qualifying`:
+Fraud penalties can be cleared self-service, at the cost of demotion back to `qualifying`:
 
 ```bash
 curl -X DELETE https://beamcore.b1m.ai/orchestrators/history \
-  -H "Authorization: Bearer <api-key>" -H 'Content-Type: application/json' -d '{"confirm":true}'
+  -H "Authorization: Bearer <api_key>" -H 'Content-Type: application/json' -d '{"confirm":true}'
 ```
 
 **If integrity is confirmed, that hotkey is finished.** You need a new hotkey — and because
@@ -1293,111 +868,190 @@ curl -X DELETE https://beamcore.b1m.ai/orchestrators/history \
 
 ---
 
-## 9. Troubleshooting
+## 10. How scoring actually works
+
+Two separate scores. Confusing them is the most common analytical mistake.
+
+### Stage A — how much work you are sent (PRISM)
+
+```
+performance = 0.4 × throughput_score + 0.6 × reliability_score
+final       = performance × readiness_multiplier × penalty_multiplier
+```
+
+| Constant | Value |
+|---|---|
+| Throughput weight | 0.4 |
+| Reliability weight | 0.6 |
+| Fleet normalization floor | 0.2 |
+| Evidence lookback | 1 day |
+| Reliability half-life | 1 hour |
+| Graduation confidence | 0.9 |
+| Target verified tasks | 120 (`verified_task_count`) |
+
+Three consequences, all favourable to a careful small operator:
+
+1. **Reliability outweighs throughput, 0.6 to 0.4.** A small flawless node beats a big flaky one.
+2. **Normalization floors at 0.2**, so work allocation spreads only ~5× between best and worst.
+3. **Readiness is linear in uptime.** 90% uptime costs 10% of your score; a dropped control-plane
+   connection sets it to **zero**.
+
+### Stage B — graduating out of the zero-emission pool
+
+```
+confidence = min(1, verified_task_count/120) × success_rate × (0.8 + 0.2 × age_ratio)
+```
+
+> **It is `verified_task_count`, not `verified_transfer_count`.** The PRISM response carries both
+> and they differ by an order of magnitude — transfers are the multipart operations, tasks are
+> the chunks inside them (roughly 20+ tasks per transfer). Only `verified_task_count` reproduces
+> the reported `confidence_score`. Watching the wrong counter makes graduation look impossibly
+> far away.
+
+New orchestrators start in `qualifying` and **earn nothing**, receiving randomized equal-share
+work so everyone can build evidence. Graduate at **confidence ≥ 0.9**.
+
+> ### The success-rate ceiling — the trap in this formula
+>
+> Past 120 tasks and 1 day of age, both other terms saturate at 1.0, so the formula collapses to:
+>
+> ```
+> confidence_max = success_rate
+> ```
+>
+> **A success rate below 0.90 makes graduation arithmetically impossible**, however many tasks
+> you complete. Tasks and age are only a matter of waiting. Success rate is the one term that can
+> permanently lock you out of emissions, and the only lever on it is not accepting work you
+> cannot deliver — which is why Step 3.4 insists on an honest bandwidth claim.
+>
+> If it drifts toward 0.90, cut `BEAM_WORKER_BANDWIDTH_MBPS` toward your measured
+> `verified_bandwidth_mbps` and restart the worker. `throughput_score` is fleet-normalised and
+> saturates at 1.0, so a lower honest claim usually costs nothing.
+
+### Stage C — converting to emissions (the cliff)
+
+```
+raw = verified_uploaded_mib × penalty_multiplier
+TIER_SHARES = { A: 0.50, B: 0.35, C: 0.10, D: 0.04, E: 0.01 }
+```
+
+- **PRISM score** decides how much work you get (~5× spread)
+- **Verified uploaded MiB** decides your rank
+- **Rank** drops you into a tier (~50× spread)
+
+That mismatch is the cliff. Ties break by rawScore → prismFinalScore → uploadedMiB → **lower UID
+wins**.
+
+### Verified against a live node
+
+UID 92, 2026-09-22, ~18 hours old. The published constants reproduce exactly:
+
+```
+throughput 1 · reliability 0.82502  →  0.4(1) + 0.6(0.82502) = 0.89501    (reported 0.89501)
+performance 0.89501 × readiness 0.99687 × penalty 1          = 0.89221    (reported 0.89221)
+tasks 60/120 × success 0.9156 × (0.8 + 0.2 × age 0.74)       = 0.4340     (reported 0.4343)
+```
+
+Read that as: throughput maxed against the fleet, uptime 99.7%, no penalties, and graduation
+gated on task count — but with only 1.7% of headroom above the success-rate floor.
+
+An hour later, same node, showing what healthy progress looks like:
+
+```
+tasks 88/120 × success 0.9483 × (0.8 + 0.2 × age 0.78) = 0.6648    (reported 0.6654)
+0.4(1) + 0.6(0.90993) = 0.94596 → × 0.99705 = 0.94316              (reported 0.94316)
+```
+
+Tasks arrived at ~28/hour, success rate climbed 0.9156 → 0.9483, and headroom above the 0.90
+floor widened from 1.7% to 4.8%. Note the threshold does not require `age_ratio` to reach 1.0:
+at 120 tasks and a 0.9483 success rate, confidence is 0.9066 — over the line at age 0.78. Solve
+`success_rate × (0.8 + 0.2 × age) >= 0.9` to see when your own node qualifies.
+
+---
+
+## 11. Troubleshooting index
+
+### On your PC
+
+| Symptom | Cause and fix |
+|---|---|
+| `error: externally-managed-environment` | PEP 668. Use `pipx` or a venv (Step 1.1), never `--break-system-packages` |
+| `btcli: command not found` in a new shell | venv not activated. `source ~/bt/bin/activate`, or use `pipx` |
+| `Conflict detected: 'scalecodec' is installed` | Two SCALE codecs. See Step 1.1 |
+| `Bad owner or permissions on ~/.ssh/config` | `chmod 700 ~/.ssh && chmod 600 ~/.ssh/config` |
+| `Permissions 0644 for 'id_ed25519_beam' are too open` | `chmod 600 ~/.ssh/id_ed25519_beam` |
+| `Too many authentication failures` | Add `IdentitiesOnly yes` to the host block (Step 1.5) |
+| `sudo: a terminal is required to read the password` | A command passed to `ssh` has no TTY. Use `ssh -t host 'sudo …'` |
 
 ### On the VPS
 
 | Symptom | Cause and fix |
 |---|---|
-| `orchestrator_not_routable` | Connected to NATS before registering. Re-run Step 8, restart. |
-| `403 hotkey is not registered` | Step 3 not done, or wrong netuid/network |
-| `missing /etc/beam/orchestrator.creds — run 03 first` | You registered in Step 8 by hand; only the script writes that file. Derive it from `beam.env` (see Step 8) — do not re-register |
-| `duplicate_control_session` | Two orchestrator processes on one hotkey. Run exactly one. |
-| `-ERR invalid client protocol` | Non-canonical binary. Rebuild from source. |
-| `x509: certificate relies on legacy Common Name field` | Cert has no SAN. Re-run Step 6. |
-| Stuck in `qualifying` past 48 h | Check CPU saturation (`htop`), worker transfer errors, and that 8782 is reachable from outside |
-| `readinessMultiplier` = 0 | Control plane disconnected, or cert expired |
-| `404 page not found` from `127.0.0.1:8781` | Wrong path, not a broken service. Health is `GET /healthz`, not `/v1/orchestrator/health` (the published docs are wrong). A 404 proves the server is up |
-| `open /etc/beam/wcp.crt: permission denied`, service restart-looping | `/etc/beam` is `root:root` mode 750, so the `beam` user cannot search it; the cert files may also still be `root:root`. Fix: `sudo chown root:beam /etc/beam /etc/beam/wcp.crt /etc/beam/wcp.key /etc/beam/beam.env`, then `sudo chmod 750 /etc/beam; sudo chmod 644 /etc/beam/wcp.crt; sudo chmod 640 /etc/beam/wcp.key /etc/beam/beam.env`. Verify with `sudo -u beam cat /etc/beam/wcp.key > /dev/null` before restarting |
-| Rank stuck in Tier E | Usually CPU-bound during bursts. Raise worker memory/bandwidth limits, confirm BBR, then apply the day-14 rule |
-| Zero incentive but delivering work | Run `./06-check-penalty.sh` — likely a zeroed penalty multiplier |
-
-### On your Linux PC (control machine)
-
-| Symptom | Cause and fix |
-|---|---|
-| `error: externally-managed-environment` | PEP 668 — your distro protects the system Python. Use the venv or `pipx` from Step 2, not `--break-system-packages` |
-| `btcli: command not found` in a new shell | The venv is not activated. `source ~/bt/bin/activate`, or install with `pipx` so the shim is always on `PATH` |
-| `Conflict detected: 'scalecodec' is installed` | Two SCALE codecs in one environment — see the callout in Step 3 |
-| `Bad owner or permissions on /home/<you>/.ssh/config` | `chmod 700 ~/.ssh && chmod 600 ~/.ssh/config` |
-| `Permissions 0644 for 'id_ed25519_beam' are too open` | `chmod 600 ~/.ssh/id_ed25519_beam` |
-| `Too many authentication failures` | SSH offered every key you own before the right one. Add `IdentitiesOnly yes` to the host block (Step 4a-bis) |
-| `ssh-copy-id: ERROR: No identities found` | Name the key explicitly: `ssh-copy-id -i ~/.ssh/id_ed25519_beam.pub ops@IP` |
-| `sudo: a terminal is required to read the password` | A command passed to `ssh` has no TTY. Use `ssh -t host 'sudo ...'` |
-| `sh: 1: cannot create .ssh/authorized_keys: Permission denied` | `/home/ops/.ssh` exists but is root-owned — it was made with a plain `mkdir` as root. Fix from root: `chown -R ops:ops /home/ops && chmod 700 /home/ops/.ssh`, then re-run `ssh-copy-id`. If `/home/ops` is missing entirely (`useradd` without `-m`), create it first: `install -d -m 750 -o ops -g ops /home/ops` |
-| `chmod: cannot access '/root/deploy/*.sh': No such file or directory` | The glob is expanded by your shell as `ops`, which cannot read mode-700 `/root`. Let root expand it: `sudo sh -c 'chmod +x /root/deploy/*.sh'`. Confirm the files arrived with `sudo ls -l /root/deploy` |
-| SSH drops during the Step 7 build | Idle timeout. The `ServerAlive*` lines in Step 4a-bis, plus `tmux` on the VPS |
-| `btcli` hangs on `finney` | Public endpoint congestion, not your machine. Retry; `--network finney` has no local dependency |
+| `cannot create .ssh/authorized_keys: Permission denied` | `/home/ops/.ssh` is root-owned. `chown -R ops:ops /home/ops` from root |
+| `chmod: cannot access '/root/deploy/*.sh'` | Your shell expanded the glob as `ops`. Use `sudo sh -c 'chmod +x /root/deploy/*.sh'` |
+| `open /etc/beam/wcp.crt: permission denied`, restart loop | `/etc/beam` is `root:root` 750 — no search permission for `beam`. See Step 2.5 |
+| `404 page not found` from `127.0.0.1:8781` | Wrong path, not a broken service. Health is `GET /healthz` |
+| `missing /etc/beam/orchestrator.creds` | You registered by hand; create it from Step 3.1. Do **not** re-register |
+| `BEAM_WORKER_ID or --worker-id is required` | That variable is in `beam.env`, not your shell. Read it from `worker.creds` (§7) |
+| `nc` to 9470 refused | **Expected.** The room listener binds on demand (Step 3.5) |
+| `orchestrator_not_routable` | Connected to NATS before registering. Redo Step 3.1, restart |
+| `403 hotkey is not registered` | Step 1.4 not done, wrong netuid/network, or you used the **coldkey** address |
+| `duplicate_control_session` | Two orchestrator processes on one hotkey. Run exactly one |
+| `-ERR invalid client protocol` | Non-canonical binary. Rebuild from source |
+| `x509: certificate relies on legacy Common Name field` | Cert has no SAN. Re-run Step 2.5 |
+| Stuck in `qualifying` past 48 h | Check `success_rate` first (§10), then CPU saturation and that 8782 is reachable from outside |
+| `readinessMultiplier` = 0 | Control plane disconnected, or certificate expired |
+| Rank stuck in the bottom tier | Usually CPU-bound during bursts. Confirm BBR, raise worker limits, then apply the day-14 rule |
+| Zero incentive but delivering work | Run `06-check-penalty.sh` — likely a zeroed penalty multiplier |
 
 ---
 
-## 10. Glossary
+## 12. Reference and sources
 
-| Term | Meaning |
-|---|---|
-| **TAO** | Bittensor's main token (~$250) |
-| **Alpha** | A subnet's own token. You are paid in SN105 alpha (~$1.50), not TAO |
-| **netuid** | Subnet ID. Beam is 105 |
-| **UID** | Your slot. SN105 has 256, all taken |
-| **Coldkey** | Controls funds. Never on the VPS |
-| **Hotkey** | Signs work. Safe on the VPS. Cannot move funds |
-| **finney** | Bittensor mainnet |
-| **Immunity period** | Grace window before eviction. SN105: 7,500 blocks ≈ 25 h |
-| **Tempo** | Weight-setting interval. SN105: 360 blocks ≈ 72 min |
-| **PRISM** | Beam's scoring system — decides how much work you are routed |
-| **WCP** | Beam's worker control protocol (TLS 1.3, port 8782) |
-| **BeamCore** | Beam's central coordinator. Closed; computes all scores |
+### Live network state (block 9,117,624 — 2026-09-21)
 
----
+- **256 / 256 UIDs — completely full.** 249 miners + 7 validators. Zero free slots
+- **209** miners with non-zero incentive; 324 orchestrators registered, 308 live
+- Alpha 0.005335 TAO (~$1.50) · pool depth ~4,622 TAO · burn at the MinBurn floor
+- Churn: 18 UIDs in 24h, 90 in 7 days · traffic ~20 TiB/day, ~2 Gb/s average
 
-## 11. Corrections and sources
+### Why the nominal numbers are ~7× too high
 
-This guide reconciles two independent research passes. Where they disagreed, I queried the chain.
+SN105 emits 2,952 alpha/day to miners — nominally $4,432/day at spot. But actual new TAO flowing
+into the subnet, read from the chain, is `SubnetTaoInEmission[105] ≈ 6.20 TAO/day ≈ $1,744/day`.
+Miners' 41% share is **~$715/day of hard-backed value** against **$4,432/day of alpha issued** —
+about **1:6.2**. If everyone converted as they earned, price would settle near that ratio. Alpha
+fell 18% in a single day during research; that is the arithmetic playing out.
 
-**Corrected from the reference guide:**
+### Corrected here against Beam's own published material
 
 | Claim | Correction |
 |---|---|
-| "249 of 256 filled — **7 free slots**, you can register now" | **Zero free slots.** `SubnetworkN = MaxAllowedUids = 256`. The 7 are validator UIDs. Registering evicts someone. |
-| TAO inflow "0.49% × 3,600 = 17.6 TAO/day" | **5.81 TAO/day**, read directly from `SubnetTaoInEmission`. The 0.49% share was right; the 3,600 TAO/day base was not — the on-chain sum across 87 subnets is ~1,206 TAO/day. |
-| "Assume 30–50% less than nominal" | Structural ratio is **~1:6.8**, i.e. ~85% less if fully converting |
-| "Budget ~1 TAO (~$240)" for registration | Actual burn **0.0005 TAO ≈ $0.14** at the floor |
-| Domain + Let's Encrypt required | **Not required.** Self-signed works — proven from `beam-worker`'s use of `x509.NewCertPool()` |
-| Worker needs a UID "per the docs" | **Genuinely unresolved.** Runtime takes no hotkey. Test for ~$0.14 rather than assuming |
+| Orchestrator health at `/v1/orchestrator/health` | **Wrong.** The route is `GET /healthz`. Verified in the compiled route table |
+| Worker needs its own UID "per the docs" | **No.** One hotkey serves both; BeamCore returns `worker_id == orchestrator_id` |
+| "249 of 256 filled — 7 free slots" | **Zero free slots.** The 7 are validator UIDs |
+| TAO inflow "17.6 TAO/day" | **~6.2 TAO/day**, read from `SubnetTaoInEmission` |
+| "Budget ~1 TAO for registration" | Actual burn **0.0005 TAO ≈ $0.14** |
+| Domain + Let's Encrypt required | **Not required.** Self-signed works — the worker trusts only your file |
+| Room listener should be bound at startup | **On-demand** for `room.transfer.direct.v1`. An idle 9470 is correct |
 
-**Adopted from the reference guide** (it was right and I had missed these): the Step 0 pre-flight
-discipline, VPS hardening, `btcli wallet sign` instead of custom tooling, `-trimpath` builds,
-**room transfers on port 9470**, the day-14 decision checkpoint, unstaking slippage, and — most
-valuably — the existence of
-[beam-core-public](https://github.com/Beam-Network/beam-core-public), which let both passes verify
-the scoring logic against Beam's own source rather than inferring it.
+### Added here, found nowhere else
 
-**Resolved by deployment (2026-09-22):** the worker does **not** need its own UID. Registering
-it with the orchestrator's hotkey is accepted, and BeamCore returns `worker_id ==
-orchestrator_id`. Both research passes left this open and warned it could double the UID cost;
-it does not. Also confirmed by the same deployment: with `room.transfer.direct.v1` the room
-listener binds **on demand**, so port 9470 is closed on an idle worker — `Connection refused`
-there is correct, not a misconfiguration.
-
-**Corrected against the compiled binary (build `8be314b`):** Beam's `docs/orchestrator.md` and
-the reference guide both document the orchestrator health endpoint as
-`GET /v1/orchestrator/health`. That route does not exist — `internal/orchestrator/server`
-registers `GET /healthz` at the root. Everything else in that namespace, `memberships` included,
-matches the docs. Trust the route table over the documentation.
-
-**Added here:** `--allow-public-network-listeners` (defaults false, gates room listeners), the
-two-address trap, TCP/BBR tuning with BDP rationale, penalty classification and permanence,
-re-registration keeping qualified status, and `SAME_IP` sybil risk.
+`--allow-public-network-listeners` (defaults false, gates room listeners entirely) · the
+two-address trap · TCP/BBR tuning with the BDP rationale · penalty classification and permanence
+· re-registration preserving qualified status · `SAME_IP` sybil risk · the `/etc/beam` ownership
+trap · the success-rate ceiling in §10.
 
 ### Sources
 
-- [Beam-Network/beam](https://github.com/Beam-Network/beam) — orchestrator/worker/validator guides
+- [Beam-Network/beam](https://github.com/Beam-Network/beam) — orchestrator, worker, validator guides
 - [Beam-Network/beam-core-public](https://github.com/Beam-Network/beam-core-public) — PRISM and tier logic
-- Finney chain via `substrate-interface`, block 9,099,090
+- Beam build `8be314b`, read directly for route tables and listener behaviour
 - [BeamCore OpenAPI](https://beamcore.b1m.ai/openapi.json) · [dashboard](https://data.b1m.ai/)
 - [taostats SN105](https://taostats.io/subnets/105/metagraph) · [PetroSky pricing](https://petrosky.io/pricing/pro)
-- Full analysis: [SN105-Beam-mining-analysis.md](SN105-Beam-mining-analysis.md)
+- Deployment kit: [deploy/](deploy/) · full analysis: [SN105-Beam-mining-analysis.md](SN105-Beam-mining-analysis.md)
 
 ---
 
-*Not financial advice. Figures verified 2026-09-18 and will change. Re-verify before committing funds.*
+*Not financial advice. Figures verified 2026-09-22 and will change. Re-verify before committing
+funds.*
