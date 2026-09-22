@@ -32,8 +32,19 @@ source "$CONF_DIR/orchestrator.creds"
 [[ -n "${ORCHESTRATOR_ID:-}" ]] || die "ORCHESTRATOR_ID not set in orchestrator.creds"
 
 log "Checking orchestrator is running"
-curl -fsS --max-time 10 "$ORCH_API/health" >/dev/null 2>&1 \
-  || die "orchestrator API unreachable at $ORCH_API — start beam-orchestrator first"
+# The health route is namespaced: /v1/orchestrator/health. A bare /health returns 404, and with
+# curl -f that 404 is indistinguishable from the process being down - which used to abort this
+# script against a perfectly healthy orchestrator. Accept ANY HTTP response as proof of life and
+# fail only on a connection error, so a route rename cannot break registration again.
+HTTP_CODE="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+              "$ORCH_API/v1/orchestrator/health" 2>/dev/null || echo 000)"
+if [[ "$HTTP_CODE" == "000" ]]; then
+  HTTP_CODE="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$ORCH_API/" 2>/dev/null || echo 000)"
+fi
+if [[ "$HTTP_CODE" == "000" ]]; then
+  die "orchestrator API unreachable at $ORCH_API - start beam-orchestrator first"
+fi
+echo "orchestrator API responding (HTTP $HTTP_CODE)"
 
 log "Resolving keys"
 HOTKEY_SS58="$("$SCRIPT_DIR/02-sign.py" --wallet "$COLDKEY" --hotkey "$HOTKEY_NAME" --ss58-only)"

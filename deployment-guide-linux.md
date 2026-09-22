@@ -891,8 +891,34 @@ receive no work and likely don't know why.
 ```bash
 sudo systemctl enable --now beam-orchestrator
 sudo journalctl -u beam-orchestrator -f
-curl http://127.0.0.1:8781/health
+curl -s http://127.0.0.1:8781/v1/orchestrator/health; echo
 ```
+
+A healthy start looks like this — three lines, then silence:
+
+```
+starting beam-orchestrator-beamcore NATS connector
+Beam Orchestrator WCP listening on 0.0.0.0:8782 (TLS 1.3)
+Beam Orchestrator 0.2.0 orchestrator_id=<uuid> listening on 127.0.0.1:8781
+```
+
+`(TLS 1.3)` means the cert **and** key loaded; `0.0.0.0` means the WCP listener is public, not
+loopback; the `orchestrator_id` means it read your Step 8 registration out of `beam.env`. Any
+`Main process exited` line after them means it is still failing — read the line above it.
+
+> **The control API is namespaced under `/v1/orchestrator/`.** A bare `curl http://127.0.0.1:8781/health`
+> returns `404 page not found` — which is not a fault: a 404 proves the HTTP server is up and
+> answering. `Connection refused` is the response that means the process is down.
+
+Local success is not the same as reachable. Confirm from **your Linux PC**, not the VPS:
+
+```bash
+nc -vz <YOUR_PUBLIC_IP> 8782
+```
+
+A timeout here is almost always `ufw` — `sudo ufw status` should list `8782/tcp` and `9470/tcp`.
+An orchestrator that looks healthy in its own log and is unreachable from outside receives no
+work at all.
 
 ### Step 11 — Register the worker
 
