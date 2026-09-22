@@ -902,7 +902,8 @@ sudo journalctl -u beam-orchestrator -f
 curl -s http://127.0.0.1:8781/healthz; echo
 ```
 
-A healthy start looks like this — three lines, then silence:
+A healthy start looks like this in the **journal** (`journalctl -u beam-orchestrator`) —
+three lines, then silence:
 
 ```
 starting beam-orchestrator-beamcore NATS connector
@@ -912,7 +913,15 @@ Beam Orchestrator 0.2.0 orchestrator_id=<uuid> listening on 127.0.0.1:8781
 
 `(TLS 1.3)` means the cert **and** key loaded; `0.0.0.0` means the WCP listener is public, not
 loopback; the `orchestrator_id` means it read your Step 8 registration out of `beam.env`. Any
-`Main process exited` line after them means it is still failing — read the line above it.
+`Main process exited` line after them means it is still failing - read the line above it.
+
+`/healthz` answers separately, as JSON — this is what success looks like:
+
+```json
+{"orchestrator_id":"fb58b7d8-75bf-42f8-b281-2c8ee01d952c","status":"ok"}
+```
+
+The id there must match the one in the log and the one BeamCore returned in Step 8.
 
 > **The health route is `GET /healthz`, at the root.** Beam's published `docs/orchestrator.md`
 > documents `/v1/orchestrator/health`; that route does not exist and returns
@@ -937,14 +946,35 @@ work at all.
 
 ### Step 11 — Register the worker
 
-```bash
-btcli wallet sign --wallet-name beam_cold --wallet-hotkey orch1 --use-hotkey \
-  --message "<HOTKEY_SS58>:<VPS_IP>:9000"
-```
+This step spans both machines. **Sign on your Linux PC; run the script on the VPS.** The script
+needs root, the orchestrator's loopback API and `/etc/beam/orchestrator.creds`, so it cannot run
+from your workstation — but signing needs your wallet, which is deliberately not on the VPS.
+
+**On your Linux PC**, sign the worker message. Note the port in the message is **9000**, which is
+the registration port, not the 9470 room-transfer port:
 
 ```bash
-./04-register-worker.sh <coldkey> <hotkey> <VPS_IP> 500
+btcli wallet sign --wallet-name beam_cold --wallet-hotkey orch1 --use-hotkey   --message "<HOTKEY_SS58>:<YOUR_PUBLIC_IP>:9000"
+btcli wallet list        # read both ss58 addresses off this
 ```
+
+**On the VPS**, pass the three values in and run the script:
+
+```bash
+sudo env HOTKEY_SS58=<hotkey ss58> COLDKEY_SS58=<coldkey ss58> SIG=0x<signature>   /root/deploy/04-register-worker.sh beam_cold orch1 <YOUR_PUBLIC_IP> 500
+```
+
+With those set, the script skips `02-sign.py` entirely and no wallet tooling is needed on the
+server. It echoes the message it will use — check it matches what you signed, character for
+character, before it posts.
+
+> **Why not let the script sign on the VPS?** It would need `bittensor_wallet` installed there,
+> plus `coldkeypub.txt`, which Step 5 intentionally leaves behind — and `sudo` resets `HOME` to
+> `/root`, so the hotkey you copied to `/home/ops/.bittensor` would not be found anyway. Keeping
+> the wallet off the server is the point, so signing stays on your PC.
+>
+> Use `sudo env VAR=...`, not `sudo VAR=...`. With the default `env_reset` in sudoers the latter
+> is rejected with *"not allowed to set the following environment variables"*.
 
 > **Be honest with `claimed_bandwidth_mbps`.** PRISM scores *provider-verified* throughput, so
 > overclaiming gains nothing — but it pulls in work you cannot deliver, and failures hit

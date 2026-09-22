@@ -47,14 +47,38 @@ fi
 echo "orchestrator API responding (HTTP $HTTP_CODE)"
 
 log "Resolving keys"
-HOTKEY_SS58="$("$SCRIPT_DIR/02-sign.py" --wallet "$COLDKEY" --hotkey "$HOTKEY_NAME" --ss58-only)"
-COLDKEY_SS58="$("$SCRIPT_DIR/02-sign.py" --wallet "$COLDKEY" --hotkey "$HOTKEY_NAME" --coldkeypub-only)"
+# Signing normally happens here via 02-sign.py, which needs bittensor_wallet plus the wallet
+# directory (including coldkeypub.txt). Neither belongs on the VPS: Step 5 copies only the
+# hotkey, and sudo resets HOME to /root so the wallet would not be found anyway.
+#
+# So: if HOTKEY_SS58, COLDKEY_SS58 and SIG are supplied in the environment, use them and never
+# touch a wallet here. Produce them on your workstation with btcli:
+#
+#   btcli wallet list                       # read both ss58 addresses
+#   btcli wallet sign --wallet-name <cold> --wallet-hotkey <hot> --use-hotkey \
+#     --message "<HOTKEY_SS58>:<PUBLIC_IP>:9000"
+#
+# then on the VPS:
+#
+#   sudo HOTKEY_SS58=5... COLDKEY_SS58=5... SIG=0x... \
+#     /root/deploy/04-register-worker.sh <cold> <hot> <PUBLIC_IP> 500
+if [[ -n "${HOTKEY_SS58:-}" && -n "${COLDKEY_SS58:-}" && -n "${SIG:-}" ]]; then
+  echo "using pre-signed values from the environment (no wallet needed on this host)"
+else
+  [[ -x "$SCRIPT_DIR/02-sign.py" ]] \
+    || die "02-sign.py not executable, and HOTKEY_SS58/COLDKEY_SS58/SIG were not supplied"
+  python3 -c 'import bittensor_wallet' 2>/dev/null || python3 -c 'import bittensor' 2>/dev/null \
+    || die "no bittensor wallet library on this host. Sign on your workstation instead, then:
+  sudo env HOTKEY_SS58=... COLDKEY_SS58=... SIG=0x... $0 $*"
+  HOTKEY_SS58="$("$SCRIPT_DIR/02-sign.py" --wallet "$COLDKEY" --hotkey "$HOTKEY_NAME" --ss58-only)"
+  COLDKEY_SS58="$("$SCRIPT_DIR/02-sign.py" --wallet "$COLDKEY" --hotkey "$HOTKEY_NAME" --coldkeypub-only)"
+  log "Signing '${HOTKEY_SS58}:${PUBLIC_IP}:${WORKER_PORT}'"
+  SIG="$("$SCRIPT_DIR/02-sign.py" --wallet "$COLDKEY" --hotkey "$HOTKEY_NAME" \
+          --message "${HOTKEY_SS58}:${PUBLIC_IP}:${WORKER_PORT}")"
+fi
 echo "hotkey:  $HOTKEY_SS58"
 echo "coldkey: $COLDKEY_SS58"
-
-log "Signing '${HOTKEY_SS58}:${PUBLIC_IP}:${WORKER_PORT}'"
-SIG="$("$SCRIPT_DIR/02-sign.py" --wallet "$COLDKEY" --hotkey "$HOTKEY_NAME" \
-        --message "${HOTKEY_SS58}:${PUBLIC_IP}:${WORKER_PORT}")"
+echo "message: ${HOTKEY_SS58}:${PUBLIC_IP}:${WORKER_PORT}"
 
 log "POST ${CORE_SERVER_URL}/workers/register"
 # claimed_bandwidth_mbps is a claim, not a measurement. PRISM scores provider-VERIFIED
