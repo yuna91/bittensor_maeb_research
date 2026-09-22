@@ -77,15 +77,19 @@ chunks between cloud storage endpoints and are paid for verified bytes delivered
 | **Worker** | Executes the byte transfers, returns signed results | **Unresolved — see below** |
 | **Validator** | Relays BeamCore's weight vector on-chain | Yes — not your path |
 
-> **Open question: does the worker need its own UID?**
-> `docs/worker.md` says "Bittensor worker hotkey registered on subnet 105" and shows a
-> `btcli subnets register` call. But the worker runtime accepts **no hotkey or wallet argument
-> at all** — the hotkey only signs the one-time `POST /workers/register`; runtime identity is
-> `worker_id` + Ed25519 node key + membership.
+> **RESOLVED: the worker does *not* need its own UID.** Verified against the live API on
+> 2026-09-22: `POST /workers/register`, signed with the **orchestrator's** hotkey, returned 2xx —
+> no 403 — and BeamCore assigned a `worker_id` **identical to the `orchestrator_id`**, keying
+> both records to the same hotkey identity. The membership binding then succeeded and the
+> orchestrator's manifest advertised the worker's full capability set.
 >
-> **Resolve it cheaply:** register one hotkey, then try the worker registration with that same
-> hotkey (Step 11). If it returns 403, register a second hotkey for ~$0.14 more. Do not
-> pre-emptively buy two UIDs, and do not assume you only need one.
+> A solo operator therefore needs **one** hotkey and **one** registration, not two. Background:
+> `docs/worker.md` says "Bittensor worker hotkey registered on subnet 105" and shows a
+> `btcli subnets register` call, but the worker runtime accepts **no hotkey or wallet argument
+> at all** — the hotkey only signs that one-time request; runtime identity is `worker_id` +
+> Ed25519 node key + membership. The docs overstate the requirement.
+>
+> If a future change does return 403 at Step 11, register a second hotkey for ~$0.14 and re-run.
 
 ### Live network state (block 9,117,624 — 2026-09-21)
 
@@ -146,6 +150,38 @@ confidence = min(1, verifiedTasks/120) × successRate × (0.8 + 0.2 × ageRatio)
 ```
 
 Graduate at **confidence ≥ 0.9**: ~120 verified tasks, near-perfect success rate, 24h+ of age.
+
+> ### The success-rate ceiling — the trap in this formula
+>
+> Once you pass 120 verified tasks and 1 day of age, both other terms saturate at 1.0, so the
+> formula collapses to:
+>
+> ```
+> confidence_max = success_rate
+> ```
+>
+> **A success rate below 0.90 therefore makes graduation arithmetically impossible**, however
+> many tasks you complete. Tasks and age are only a matter of waiting; success rate is the one
+> term that can permanently lock you out of emissions, and the only lever on it is not accepting
+> work you cannot deliver. This is the concrete reason Step 11 tells you to be honest with
+> `claimed_bandwidth_mbps`.
+>
+> Watch it directly — `/orchestrators/prism-scores/<uid>` reports `success_rate` alongside
+> everything else. If it sits near 0.90, cut `BEAM_WORKER_BANDWIDTH_MBPS` toward your measured
+> `verified_bandwidth_mbps` and restart the worker. `throughput_score` is fleet-normalised and
+> saturates at 1.0, so a lower honest claim usually costs nothing.
+
+**Verified against live data (UID 92, 2026-09-22), and the published constants reproduce exactly:**
+
+```
+throughput 1 · reliability 0.82502 -> performance 0.4(1)+0.6(0.82502) = 0.89501   (reported 0.89501)
+performance 0.89501 x readiness 0.99687 x penalty 1 = 0.89221                     (reported 0.89221)
+tasks 60/120 x success 0.9156 x (0.8 + 0.2 x age 0.74) = 0.4340                   (reported 0.4343)
+```
+
+`age_days` here is age at **BeamCore**, counted from Step 8 — not from your on-chain
+registration, which is what the 7,500-block immunity window runs on. The two differ by however
+long you took between Step 3 and Step 8.
 
 ### Stage C — Converting to emissions (the cliff)
 
@@ -256,7 +292,7 @@ bandwidth-bound at the start.
 | Item | Cost |
 |---|---|
 | SN105 registration burn | **0.0005 TAO ≈ $0.14** — currently at the MinBurn floor; dynamic |
-| Second hotkey, if the worker needs one | ~$0.14 |
+| Second hotkey for the worker | **$0 — not needed** (verified 2026-09-22; see §2) |
 | Domain + TLS certificate | **$0 — not required** (see Step 6) |
 
 Hold ~0.05 TAO for burn plus fees. Budgeting a whole TAO is unnecessary.
@@ -878,6 +914,7 @@ sudoedit /etc/beam/beam.env
 | `REPLACE_orchestrator_id` | the `orchestrator_id` | Step 8 |
 | `REPLACE_PUBLIC_IP` (×2) | the VPS's public IPv4 | Step 6 |
 | `REPLACE_worker_id` | the `worker_id` | Step 11 — leave until then |
+| `REPLACE_uid` | your on-chain UID | after Step 3 — `btcli wallet overview --netuid 105` |
 
 `03-register-orchestrator.sh` and `04-register-worker.sh` print the values they obtain but do
 **not** write them into the file; that edit is yours. Re-run the `grep` afterwards — a leftover
@@ -994,8 +1031,9 @@ character, before it posts.
 > overclaiming gains nothing — but it pulls in work you cannot deliver, and failures hit
 > reliability, which carries **60%** of your performance score.
 
-> **A 403 here answers the §2 open question.** It means the worker needs its own registered
-> hotkey. Register a second one and re-run.
+> **This succeeded with the orchestrator's hotkey** when tested on 2026-09-22 — see §2. A 403
+> here would mean Beam has since started requiring a separate worker hotkey; register a second
+> one for ~$0.14 and re-run.
 
 ### Step 12 — Enable room transfers (extra earnings, easily missed)
 
@@ -1127,6 +1165,20 @@ ranking while ~25 UIDs are evicted daily. This is the squeeze — survive it and
 1. **Pool** — must flip `qualifying` → `qualified` within a few days
 2. **Rank** — ≤120 you are earning; 121+ you are not
 
+### Reading `btcli wallet overview` without panicking
+
+Two columns look alarming and are not:
+
+| Column | Typical value | Meaning |
+|---|---|---|
+| `ACTIVE` | **False** | tracks recent **weight-setting**. Only validators set weights, so nearly every miner reads False. Not a health signal |
+| `AXON` | **none** | Beam does not use Bittensor's axon transport. Your endpoint is the WCP listener plus the NATS session, neither published to the metagraph |
+| `INCENTIVE` | 0.00 at first | the real signal. Appears only after graduation, and moves in steps of one tempo (360 blocks, ~72 min) |
+| `UPDATED` | blocks since registration | a miner never sets weights, so this counts up from registration. **Compare it against the 7,500-block immunity window** — at ~7,500 you become evictable |
+
+`UPDATED` approaching 7,500 with `INCENTIVE` still 0 is the squeeze described above. It is
+survivable and, if you lose the slot, cheap to undo — see §8, and re-register the *same* hotkey.
+
 Alongside those, the orchestrator's own control API tells you whether work is actually arriving
 — more directly than the log does:
 
@@ -1138,6 +1190,19 @@ curl -s http://127.0.0.1:8781/v1/orchestrator/manifest | jq .       # what you a
 During the qualifying period a rising task count is the earliest sign PRISM is routing to you.
 A flat zero after a few hours, with the service healthy, points at reachability — re-check
 `nc -vz <YOUR_PUBLIC_IP> 8782` from off the box.
+
+Reading the manifest, so its quirks do not alarm you:
+
+| Field | Expected | Why |
+|---|---|---|
+| `Capabilities` | all five, incl. both room ones | proves the worker membership bound — the orchestrator can only advertise what a member worker offers |
+| `Available` == `Total` | normal | nothing in flight at that instant |
+| `cpu_millis: 1000` | fixed | **hardcoded in the binary**; no flag exists. `connections`/`streams` at 1024 likewise |
+| `Gateways: null` | normal | the handler passes `nil` for that argument — an artifact of this endpoint |
+| `ExpiresAt` a minute out | normal | the manifest carries a short TTL and is rebuilt |
+
+Only `--memory-bytes`, `--scratch-bytes` and `--bandwidth-mbps` are tunable; the binary defaults
+(512 MB / 10 GiB / 100 Mbps) are well below what `beam.env` sets.
 
 ### Uptime alerting
 
@@ -1306,6 +1371,13 @@ discipline, VPS hardening, `btcli wallet sign` instead of custom tooling, `-trim
 valuably — the existence of
 [beam-core-public](https://github.com/Beam-Network/beam-core-public), which let both passes verify
 the scoring logic against Beam's own source rather than inferring it.
+
+**Resolved by deployment (2026-09-22):** the worker does **not** need its own UID. Registering
+it with the orchestrator's hotkey is accepted, and BeamCore returns `worker_id ==
+orchestrator_id`. Both research passes left this open and warned it could double the UID cost;
+it does not. Also confirmed by the same deployment: with `room.transfer.direct.v1` the room
+listener binds **on demand**, so port 9470 is closed on an idle worker — `Connection refused`
+there is correct, not a misconfiguration.
 
 **Corrected against the compiled binary (build `8be314b`):** Beam's `docs/orchestrator.md` and
 the reference guide both document the orchestrator health endpoint as
