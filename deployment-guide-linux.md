@@ -1011,13 +1011,42 @@ Three conditions must all hold:
 That third flag appears in neither Beam's docs nor the reference guide, and without it the public
 room listener will not serve.
 
-```bash
-ExecStart=/opt/beam/bin/beam-worker serve \
-  --capabilities transfer.multipart,transfer.multipart.fanout.v1,room.transfer,room.transfer.direct.v1,room.transfer.e2ee.v2 \
-  --allow-public-network-listeners \
-  --room-transfer-addr 0.0.0.0:9470 \
-  --room-transfer-advertise-url https://<YOUR_PUBLIC_IP>:9470
+**All three are already satisfied by the kit — do not edit the unit file.** `00-bootstrap.sh`
+installed [deploy/systemd/beam-worker.service](deploy/systemd/beam-worker.service), whose
+`ExecStart` hardcodes `--allow-public-network-listeners` and takes the rest from `beam.env`:
+
+```ini
+ExecStart=/opt/beam/bin/beam-worker serve   ...
+  --capabilities ${BEAM_WORKER_CAPABILITIES}   --allow-public-network-listeners   --room-transfer-addr ${BEAM_ROOM_TRANSFER_LISTEN_ADDR}   --room-transfer-advertise-url ${BEAM_ROOM_TRANSFER_ADVERTISE_URL}
 ```
+
+So this step is **one edit in `/etc/beam/beam.env`**:
+
+| Variable | Required value | State in the template |
+|---|---|---|
+| `BEAM_WORKER_CAPABILITIES` | must include `room.transfer.direct.v1` **and** `room.transfer.e2ee.v2` | already correct |
+| `BEAM_ROOM_TRANSFER_LISTEN_ADDR` | `0.0.0.0:9470` | already correct |
+| `BEAM_ROOM_TRANSFER_ADVERTISE_URL` | `https://<YOUR_PUBLIC_IP>:9470` | **`REPLACE_PUBLIC_IP` — yours to fill** |
+
+```bash
+sudoedit /etc/beam/beam.env
+sudo grep -nE 'BEAM_WORKER_CAPABILITIES|BEAM_ROOM_TRANSFER' /etc/beam/beam.env
+sudo ufw status | grep 9470        # must be ALLOW, or nothing can reach the listener
+```
+
+No `daemon-reload` is needed — systemd re-reads `EnvironmentFile` when the service starts, so
+Step 13 picks the change up. Only a change to the `.service` file itself would need one.
+
+> **You will not see a listener on 9470, and that is correct.** For `room.transfer.direct.v1`
+> the listener binds only while a room workload is executing; verified in `cmd/beam-worker`,
+> where the eager `PrepareStorageListener()` call is gated on the hybrid
+> `room.transfer.storage.v2` capability. Verify the *capabilities* instead of the port:
+> ```bash
+> sudo grep BEAM_WORKER_CAPABILITIES /etc/beam/beam.env   # both direct.v1 and e2ee.v2
+> sudo journalctl -u beam-worker -n 5 | grep capabilities
+> ```
+> The worker `log.Fatal`s at startup if `room.transfer.direct.v1` and `room.transfer.e2ee.v2`
+> are not enabled together, so a running worker has already passed that check.
 
 ### Step 13 — Start the worker
 
@@ -1027,17 +1056,47 @@ sudo systemctl enable --now beam-worker
 
 ### Step 14 — Verify
 
+**On the VPS**, as root — it reads `beam.env` (0640) and `orchestrator.creds` (0600), so plain
+`ops` cannot run it usefully:
+
 ```bash
-./99-healthcheck.sh
+sudo /root/deploy/99-healthcheck.sh
+
+# $BEAM_WORKER_ID lives in beam.env, which your login shell never sources - read it first
+WID=$(sudo sed -n 's/^WORKER_ID=//p' /etc/beam/worker.creds)
+sudo -u beam /opt/beam/bin/beam-worker doctor --worker-id "$WID"
 ```
+
+> `worker.creds` is written by `04-register-worker.sh` in Step 11. The same value must also be
+> set as `BEAM_WORKER_ID` in `beam.env` - check with
+> `sudo grep '^BEAM_WORKER_ID' /etc/beam/beam.env`, and fill it if it still says
+> `REPLACE_worker_id`. It is the last placeholder in that file.
 
 Checks services, ports, the two-address trap, certificate SAN, BeamCore control session, PRISM
-pool, and your live on-chain rank and tier. Also:
+pool, and your live on-chain rank and tier. It exits non-zero only on **FAIL**; `WARN` lines are
+informational.
+
+> **One warning is expected.** The chain query needs a substrate client, and the VPS
+> deliberately has no Bittensor tooling — so you will see *"no substrate client found — skipping
+> chain check"*. That is by design. Read rank and tier from your workstation instead.
+
+**On your Linux PC** — the reachability test is meaningless from the VPS itself, since it would
+pass over loopback regardless of the firewall:
 
 ```bash
-/opt/beam/bin/beam-worker doctor --worker-id "$BEAM_WORKER_ID"
-nc -vz <YOUR_PUBLIC_IP> 8782     # from OUTSIDE the VPS
+nc -vz <YOUR_PUBLIC_IP> 8782      # orchestrator WCP - must succeed
+btcli wallet overview --netuid 105 --wallet-name beam_cold
 ```
+
+Only 8782 must answer. A timeout there means `ufw` on the VPS, or a listener bound to
+`127.0.0.1` rather than `0.0.0.0` — check with `ss -lnt` there.
+
+> **Do not test 9470 this way.** With `room.transfer.direct.v1` the room listener is created
+> **on demand**, when a room workload actually runs — `cmd/beam-worker` binds eagerly only on the
+> hybrid `room.transfer.storage.v2` path, via `PrepareStorageListener()`. An idle worker with a
+> perfectly correct config has nothing on 9470, and `nc` reports `Connection refused`. That is
+> the expected state, not a fault. Note `Connection refused` also proves the firewall is open —
+> a `ufw` block would time out instead.
 
 ---
 

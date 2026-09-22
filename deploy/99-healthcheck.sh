@@ -33,14 +33,29 @@ done
 section "Listening sockets"
 if ss -lnt 2>/dev/null | grep -q ':8782'; then pass "WCP listener on 8782"
 else fail "nothing listening on 8782 — workers cannot connect"; fi
-# Room transfers are extra uploaded MiB, which is what sets your rank. The listener defaults
-# to loopback and also needs --allow-public-network-listeners on the worker.
+# Room transfers are extra uploaded MiB, which is what sets your rank.
+#
+# For room.transfer.direct.v1 the listener is created ON DEMAND, when a room workload runs -
+# cmd/beam-worker binds eagerly only on the hybrid path (room.transfer.storage.v2, via
+# PrepareStorageListener). So an idle worker with a correct config has NOTHING on 9470, and
+# "connection refused" from outside is expected. Check the advertised capabilities instead;
+# a missing listener is only reportable when it is bound to the wrong address.
 if ss -lnt 2>/dev/null | grep -qE "0\.0\.0\.0:9470|\*:9470"; then
-  pass "room-transfer listener public on 9470"
+  pass "room-transfer listener public on 9470 (a transfer is in flight)"
 elif ss -lnt 2>/dev/null | grep -q ':9470'; then
-  warn "9470 is bound but not publicly — check BEAM_ROOM_TRANSFER_LISTEN_ADDR=0.0.0.0:9470"
+  fail "9470 is bound to loopback - set BEAM_ROOM_TRANSFER_LISTEN_ADDR=0.0.0.0:9470"
 else
-  warn "no room-transfer listener on 9470 — you are forfeiting Room work (extra rank)"
+  CAPS="${BEAM_WORKER_CAPABILITIES:-}"
+  if [[ "$CAPS" == *room.transfer.direct.v1* && "$CAPS" == *room.transfer.e2ee.v2* ]]; then
+    pass "room transfer capabilities advertised (listener binds on demand, so 9470 idle-closed is normal)"
+  else
+    fail "room.transfer.direct.v1 + room.transfer.e2ee.v2 not both in BEAM_WORKER_CAPABILITIES - forfeiting Room work"
+  fi
+  case "${BEAM_ROOM_TRANSFER_LISTEN_ADDR:-}" in
+    0.0.0.0:9470) ;;
+    "") warn "BEAM_ROOM_TRANSFER_LISTEN_ADDR unset - the on-demand listener will default to loopback" ;;
+    *)  warn "BEAM_ROOM_TRANSFER_LISTEN_ADDR=${BEAM_ROOM_TRANSFER_LISTEN_ADDR} (expected 0.0.0.0:9470)" ;;
+  esac
 fi
 for p in 8780 8781; do
   if ss -lnt 2>/dev/null | grep -qE "127\.0\.0\.1:$p"; then pass "control API $p bound to loopback"
