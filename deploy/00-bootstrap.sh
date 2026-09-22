@@ -23,7 +23,22 @@ log "Creating user and directories"
 id -u "$BEAM_USER" &>/dev/null || useradd --system --create-home --home-dir "$STATE_DIR" --shell /usr/sbin/nologin "$BEAM_USER"
 mkdir -p "$INSTALL_DIR" "$STATE_DIR"/{orchestrator,worker} "$CONF_DIR"
 chown -R "$BEAM_USER:$BEAM_USER" "$STATE_DIR"
+# root owns it, the service group reads it. Without the chown the directory stays root:root
+# and mode 750 denies the beam user *search* permission — every file inside then fails to
+# open, regardless of its own mode.
+chown root:"$BEAM_USER" "$CONF_DIR"
 chmod 750 "$CONF_DIR"
+
+# 01-gen-cert.sh may have run before this script created the beam user, in which case its
+# own chown silently no-opped. Re-apply here, where the user is guaranteed to exist.
+if [[ -f "$CONF_DIR/wcp.crt" ]]; then
+  chown root:"$BEAM_USER" "$CONF_DIR/wcp.crt"
+  chmod 644 "$CONF_DIR/wcp.crt"
+fi
+if [[ -f "$CONF_DIR/wcp.key" ]]; then
+  chown root:"$BEAM_USER" "$CONF_DIR/wcp.key"
+  chmod 640 "$CONF_DIR/wcp.key"
+fi
 
 log "Installing Go (1.24+ required)"
 GO_VERSION="$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -n1)"

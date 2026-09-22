@@ -692,6 +692,13 @@ and `keyCertSign` because the cert is its own root. The IP you pass is written i
 there produces a certificate that fails verification for everyone. The script prints the SAN
 block when it finishes; confirm your VPS IP is in it.
 
+> **Ownership is fixed up in Step 7, not here.** This script chowns the cert and key to
+> `root:beam`, but at this point Step 7 has not created the `beam` account yet, so that chown
+> silently no-ops and both files stay `root:root` — the failure surfaces much later as
+> `open /etc/beam/wcp.crt: permission denied` in the orchestrator log. `00-bootstrap.sh`
+> re-applies the ownership for exactly this reason. If you ever regenerate the cert *after*
+> bootstrap has run, the script gets it right on its own.
+
 ### Step 7 — Install Go and build Beam
 
 ```bash
@@ -712,6 +719,9 @@ apt-get update && apt-get install -y curl git ca-certificates openssl jq \
 useradd --system --create-home --home-dir /var/lib/beam --shell /usr/sbin/nologin beam
 mkdir -p /opt/beam /var/lib/beam/orchestrator /var/lib/beam/worker /etc/beam
 chown -R beam:beam /var/lib/beam
+# The chown is not optional. root:root + 750 denies `beam` SEARCH permission on the directory,
+# and every file inside then fails to open however permissive its own mode is.
+chown root:beam /etc/beam
 chmod 750 /etc/beam
 
 # 3. Go (latest stable)
@@ -777,13 +787,40 @@ directly — for two commands.
 
 Sign on your PC (safer — the official CLI, no custom tooling):
 
+> **`<HOTKEY_SS58>` is the *hotkey's* ss58 address**, from the `Hotkey` row of
+> `btcli wallet list` — not the coldkey's, which appears directly above it and also starts with
+> `5`. The coldkey address is used once, to receive your TAO in Step 2, and never appears in a
+> config file or API call. Swapping them yields `403 hotkey is not registered`, because a
+> coldkey is not a neuron. Confirm the right one carries your UID first:
+> ```bash
+> btcli wallet overview --netuid 105 --wallet-name beam_cold
+> ```
+> Using the scripts avoids the question — they resolve the ss58 from the wallet name.
+
 ```bash
 btcli wallet sign --wallet-name beam_cold --wallet-hotkey orch1 --use-hotkey \
   --message "<HOTKEY_SS58>:10"
 ```
 
 `10` is the fee percentage you keep. **The signed message and submitted `fee_percentage` must
-match.** Then on the VPS:
+match**, or the signature check fails.
+
+> **What the fee is, and why 10.** It is the cut your orchestrator keeps from workers registered
+> under it — Beam allows third parties to attach their workers to your orchestrator, and this
+> sets the split. **If you own both the orchestrator and its only worker, the value is
+> irrelevant**: emissions land on the hotkey holding the UID either way, so the fee just moves
+> value between your own pockets. 10 is nothing more than the default in
+> [03-register-orchestrator.sh](deploy/03-register-orchestrator.sh); leave it there.
+>
+> It starts mattering only if you later host other people's workers. More workers means more
+> capacity and more verified uploaded MiB, which is what sets your rank — so a low fee recruits,
+> a high one deters. 10% is conventional and puts nobody off.
+>
+> Treat the value as sticky. Re-registering appears to update an existing record rather than
+> create one (the script warns when no `api_key` comes back for exactly this reason), so a later
+> change is probably possible — but the kit does not confirm it.
+
+Then on the VPS:
 
 ```bash
 curl -X POST https://beamcore.b1m.ai/orchestrators/register \
@@ -793,8 +830,10 @@ curl -X POST https://beamcore.b1m.ai/orchestrators/register \
        "url":"http://<YOUR_PUBLIC_IP>:8782","max_workers":64}'
 ```
 
-Or run `./03-register-orchestrator.sh <coldkey> <hotkey> <PUBLIC_IP>`, which signs and posts in
-one step.
+**Prefer the script.** `sudo /root/deploy/03-register-orchestrator.sh <coldkey> <hotkey> <PUBLIC_IP>`
+signs and posts in one step, taking the fee from a single variable so the message and the body
+cannot drift apart — the one mistake that reliably breaks this call. A different fee goes in the
+optional 4th argument (`... <PUBLIC_IP> 5`), never by editing one of the two places by hand.
 
 > **Save `orchestrator_id` and `api_key` immediately — the key is returned only once.**
 > 403 means your hotkey is not on the metagraph; go back to Step 3.
@@ -1046,6 +1085,7 @@ curl -X DELETE https://beamcore.b1m.ai/orchestrators/history \
 | `x509: certificate relies on legacy Common Name field` | Cert has no SAN. Re-run Step 6. |
 | Stuck in `qualifying` past 48 h | Check CPU saturation (`htop`), worker transfer errors, and that 8782 is reachable from outside |
 | `readinessMultiplier` = 0 | Control plane disconnected, or cert expired |
+| `open /etc/beam/wcp.crt: permission denied`, service restart-looping | `/etc/beam` is `root:root` mode 750, so the `beam` user cannot search it; the cert files may also still be `root:root`. Fix: `sudo chown root:beam /etc/beam /etc/beam/wcp.crt /etc/beam/wcp.key /etc/beam/beam.env`, then `sudo chmod 750 /etc/beam; sudo chmod 644 /etc/beam/wcp.crt; sudo chmod 640 /etc/beam/wcp.key /etc/beam/beam.env`. Verify with `sudo -u beam cat /etc/beam/wcp.key > /dev/null` before restarting |
 | Rank stuck in Tier E | Usually CPU-bound during bursts. Raise worker memory/bandwidth limits, confirm BBR, then apply the day-14 rule |
 | Zero incentive but delivering work | Run `./06-check-penalty.sh` — likely a zeroed penalty multiplier |
 
