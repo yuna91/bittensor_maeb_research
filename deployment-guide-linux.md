@@ -643,7 +643,7 @@ scp -r deploy beam-vps:/home/ops/deploy
 # then on the VPS
 sudo install -d -m 700 /root/deploy
 sudo cp -r /home/ops/deploy/. /root/deploy/
-sudo chmod +x /root/deploy/*.sh
+sudo find /root/deploy -name '*.sh' -exec chmod +x {} +
 rm -rf /home/ops/deploy
 sudo ls -l /root/deploy
 ```
@@ -651,13 +651,29 @@ sudo ls -l /root/deploy
 `rsync -av --delete deploy/ beam-vps:/home/ops/deploy/` is the better form once you start
 iterating on the scripts — it re-sends only what changed.
 
+> **Why `find` and not `chmod +x /root/deploy/*.sh`?** Your shell expands the glob as `ops`
+> *before* `sudo` runs, and `/root` is mode 700 — so it matches nothing and `chmod` is handed the
+> literal string, giving `cannot access '/root/deploy/*.sh': No such file or directory`. The
+> files are fine. Any wildcard inside a root-only path needs to be expanded by root:
+> `sudo sh -c 'chmod +x /root/deploy/*.sh'` works too.
+
 > Scripts that read `/etc/beam/beam.env` (`99-healthcheck.sh`, `06-check-penalty.sh`) need root
 > or membership of a group you grant read access; run them with `sudo`.
 
 ### Step 6 — Generate the TLS certificate (self-signed, no domain)
 
+> **`<YOUR_PUBLIC_IP>`, `<PUBLIC_IP>` and `<VPS_IP>` all mean one thing: the VPS's own public
+> IPv4** — never your workstation's, which nothing ever dials and which is usually dynamic and
+> behind NAT. The same value goes into Steps 6, 8, 9, 11, 12 and 14. Read it off the VPS once:
+> ```bash
+> curl -4 -s ifconfig.me; echo
+> ip -4 addr show scope global | grep inet     # cross-check — PetroSky gives a dedicated IPv4
+> ```
+> `YOUR_VPS_IP` in Step 4 is the same address too; from Step 5 onward the `beam-vps` SSH alias
+> stands in for it.
+
 ```bash
-sudo /root/deploy/01-gen-cert.sh <YOUR_PUBLIC_IP>
+sudo /root/deploy/01-gen-cert.sh <YOUR_PUBLIC_IP>     # the VPS's public IPv4
 ```
 
 > **You do not need a domain or Let's Encrypt.** The worker builds its trust store from an
@@ -671,7 +687,10 @@ sudo /root/deploy/01-gen-cert.sh <YOUR_PUBLIC_IP>
 > your readiness multiplier if it ever lapsed.
 
 Requirements the script handles: **SAN is mandatory** (Go ignores Common Name), plus `CA:TRUE`
-and `keyCertSign` because the cert is its own root.
+and `keyCertSign` because the cert is its own root. The IP you pass is written into the SAN as
+`IP:<PUBLIC_IP>`, and workers verify the address they dialled against it — a workstation IP
+there produces a certificate that fails verification for everyone. The script prints the SAN
+block when it finishes; confirm your VPS IP is in it.
 
 ### Step 7 — Install Go and build Beam
 
@@ -782,23 +801,39 @@ one step.
 
 ### Step 9 — Configure
 
-`/etc/beam/beam.env`, mode 0640:
+**The file already exists — do not write it from scratch.** Step 7's `00-bootstrap.sh` installed
+`/etc/beam/beam.env` from [deploy/beam.env.example](deploy/beam.env.example) at mode 0640,
+owner `root`, group `beam`. Your job here is to replace the five `REPLACE_*` placeholders:
 
 ```bash
-CORE_SERVER_URL=https://beamcore.b1m.ai
-BEAM_ENV=prod
-NETUID=105
-SUBTENSOR_NETWORK=finney
-BEAM_BITTENSOR_HOTKEY=<HOTKEY_SS58>
-BEAMCORE_NATS_URL=tls://orch-gateway.b1m.ai:4222
-BEAMCORE_NATS_USER=<HOTKEY_SS58>
-BEAMCORE_NATS_PASSWORD=<api_key>
-BEAMCORE_GATEWAY_URL=http://<YOUR_PUBLIC_IP>:8782
-BEAM_WCP_LISTEN_ADDR=0.0.0.0:8782
-BEAM_WCP_TLS_CERT=/etc/beam/wcp.crt
-BEAM_WCP_TLS_KEY=/etc/beam/wcp.key
-BEAM_ROOM_TUNNEL_COORDINATOR_URL=https://coordinator.b1m.ai
+sudo grep -n REPLACE_ /etc/beam/beam.env      # shows exactly what is left to fill
+sudoedit /etc/beam/beam.env
 ```
+
+| Placeholder | Value | Available from |
+|---|---|---|
+| `REPLACE_hotkey_ss58` (×2) | your hotkey ss58 | Step 2 — `btcli wallet list` |
+| `REPLACE_orchestrator_api_key` | the one-time `api_key` | **Step 8 — shown once, never again** |
+| `REPLACE_orchestrator_id` | the `orchestrator_id` | Step 8 |
+| `REPLACE_PUBLIC_IP` (×2) | the VPS's public IPv4 | Step 6 |
+| `REPLACE_worker_id` | the `worker_id` | Step 11 — leave until then |
+
+`03-register-orchestrator.sh` and `04-register-worker.sh` print the values they obtain but do
+**not** write them into the file; that edit is yours. Re-run the `grep` afterwards — a leftover
+`REPLACE_` is a service that starts and then fails to authenticate.
+
+> **Why not just type out the variables you see referenced in this guide?** Because the worker
+> unit interpolates `${BEAM_WORKER_CAPABILITIES}`, `${BEAM_WORKER_MEMORY_BYTES}`,
+> `${BEAM_WORKER_SCRATCH_BYTES}`, `${BEAM_WORKER_BANDWIDTH_MBPS}` and the two
+> `${BEAM_ROOM_TRANSFER_*}` values straight into its `ExecStart`
+> ([beam-worker.service](deploy/systemd/beam-worker.service)). A hand-written subset produces a
+> malformed command line, and omitting `BEAM_WCP_CA` / `BEAM_WCP_SERVER_NAME` leaves the worker
+> unable to verify TLS against your own orchestrator. Edit the installed template; do not
+> replace it.
+
+The cert paths `01-gen-cert.sh` printed at the end of Step 6 — `BEAM_WCP_TLS_CERT`,
+`BEAM_WCP_TLS_KEY`, `BEAM_WCP_CA`, `BEAM_WCP_SERVER_NAME=beam-orch` — are **already correct in
+the template**. That message is generic advice for a hand-built config; you can ignore it.
 
 ### ⚠ The mistake that silently kills your miner
 
@@ -1026,6 +1061,7 @@ curl -X DELETE https://beamcore.b1m.ai/orchestrators/history \
 | `Too many authentication failures` | SSH offered every key you own before the right one. Add `IdentitiesOnly yes` to the host block (Step 4a-bis) |
 | `ssh-copy-id: ERROR: No identities found` | Name the key explicitly: `ssh-copy-id -i ~/.ssh/id_ed25519_beam.pub ops@IP` |
 | `sh: 1: cannot create .ssh/authorized_keys: Permission denied` | `/home/ops/.ssh` exists but is root-owned — it was made with a plain `mkdir` as root. Fix from root: `chown -R ops:ops /home/ops && chmod 700 /home/ops/.ssh`, then re-run `ssh-copy-id`. If `/home/ops` is missing entirely (`useradd` without `-m`), create it first: `install -d -m 750 -o ops -g ops /home/ops` |
+| `chmod: cannot access '/root/deploy/*.sh': No such file or directory` | The glob is expanded by your shell as `ops`, which cannot read mode-700 `/root`. Let root expand it: `sudo sh -c 'chmod +x /root/deploy/*.sh'`. Confirm the files arrived with `sudo ls -l /root/deploy` |
 | SSH drops during the Step 7 build | Idle timeout. The `ServerAlive*` lines in Step 4a-bis, plus `tmux` on the VPS |
 | `btcli` hangs on `finney` | Public endpoint congestion, not your machine. Retry; `--network finney` has no local dependency |
 
