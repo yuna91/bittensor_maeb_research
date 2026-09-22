@@ -846,6 +846,20 @@ optional 4th argument (`... <PUBLIC_IP> 5`), never by editing one of the two pla
 > **Save `orchestrator_id` and `api_key` immediately — the key is returned only once.**
 > 403 means your hotkey is not on the metagraph; go back to Step 3.
 
+> **If you registered by hand rather than with the script, also write
+> `/etc/beam/orchestrator.creds`.** Only `03-register-orchestrator.sh` creates it, and
+> Steps 11 and 14 plus `06-check-penalty.sh` read it — without it the health and penalty checks
+> silently skip their PRISM queries. Once `beam.env` is filled in (Step 9), derive it:
+> ```bash
+> sudo sh -c '. /etc/beam/beam.env
+> umask 077
+> printf "ORCHESTRATOR_ID=%s
+ORCHESTRATOR_API_KEY=%s
+HOTKEY_SS58=%s
+" >   "$BEAM_ORCHESTRATOR_ID" "$BEAMCORE_NATS_PASSWORD" "$BEAM_BITTENSOR_HOTKEY" >   > /etc/beam/orchestrator.creds
+> chmod 600 /etc/beam/orchestrator.creds'
+> ```
+
 ### Step 9 — Configure
 
 **The file already exists — do not write it from scratch.** Step 7's `00-bootstrap.sh` installed
@@ -1163,6 +1177,7 @@ curl -X DELETE https://beamcore.b1m.ai/orchestrators/history \
 |---|---|
 | `orchestrator_not_routable` | Connected to NATS before registering. Re-run Step 8, restart. |
 | `403 hotkey is not registered` | Step 3 not done, or wrong netuid/network |
+| `missing /etc/beam/orchestrator.creds — run 03 first` | You registered in Step 8 by hand; only the script writes that file. Derive it from `beam.env` (see Step 8) — do not re-register |
 | `duplicate_control_session` | Two orchestrator processes on one hotkey. Run exactly one. |
 | `-ERR invalid client protocol` | Non-canonical binary. Rebuild from source. |
 | `x509: certificate relies on legacy Common Name field` | Cert has no SAN. Re-run Step 6. |

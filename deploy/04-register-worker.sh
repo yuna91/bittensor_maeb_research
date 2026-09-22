@@ -26,9 +26,29 @@ die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 [[ -n "$COLDKEY" && -n "$HOTKEY_NAME" && -n "$PUBLIC_IP" ]] \
   || die "usage: $0 <coldkey> <hotkey> <PUBLIC_IP> [claimed_bandwidth_mbps]"
 command -v jq >/dev/null || die "jq not installed (run 00-bootstrap.sh)"
-[[ -f "$CONF_DIR/orchestrator.creds" ]] || die "missing $CONF_DIR/orchestrator.creds — run 03 first"
-# shellcheck disable=SC1091
-source "$CONF_DIR/orchestrator.creds"
+# orchestrator.creds is written by 03-register-orchestrator.sh. Registering by hand (btcli sign
+# + curl, as the guide also documents) never creates it — but beam.env holds the same values, so
+# fall back to that rather than making the user redo a registration that already succeeded.
+if [[ -f "$CONF_DIR/orchestrator.creds" ]]; then
+  # shellcheck disable=SC1091
+  source "$CONF_DIR/orchestrator.creds"
+elif [[ -f "$CONF_DIR/beam.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$CONF_DIR/beam.env"
+  ORCHESTRATOR_ID="${ORCHESTRATOR_ID:-${BEAM_ORCHESTRATOR_ID:-}}"
+  ORCHESTRATOR_API_KEY="${ORCHESTRATOR_API_KEY:-${BEAMCORE_NATS_PASSWORD:-}}"
+  if [[ -n "$ORCHESTRATOR_ID" ]]; then
+    echo "no orchestrator.creds — using BEAM_ORCHESTRATOR_ID from beam.env"
+    umask 077
+    printf 'ORCHESTRATOR_ID=%s\nORCHESTRATOR_API_KEY=%s\nHOTKEY_SS58=%s\n' \
+      "$ORCHESTRATOR_ID" "$ORCHESTRATOR_API_KEY" "${BEAM_BITTENSOR_HOTKEY:-}" \
+      > "$CONF_DIR/orchestrator.creds"
+    chmod 600 "$CONF_DIR/orchestrator.creds"
+    echo "wrote $CONF_DIR/orchestrator.creds for 99-healthcheck.sh and 06-check-penalty.sh"
+  fi
+else
+  die "neither $CONF_DIR/orchestrator.creds nor $CONF_DIR/beam.env exists - run step 8 first"
+fi
 [[ -n "${ORCHESTRATOR_ID:-}" ]] || die "ORCHESTRATOR_ID not set in orchestrator.creds"
 
 log "Checking orchestrator is running"
